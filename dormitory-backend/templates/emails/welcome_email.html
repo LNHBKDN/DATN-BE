@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Chào mừng đến với Hệ thống Ký túc xá</title>
+</head>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+    <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+        <h2 style="color: #007bff;">Chào mừng {{ fullname }}!</h2>
+        <p>Xin chào,</p>
+        <p>Tài khoản của bạn đã được tạo thành công trong <strong>Hệ thống Ký túc xá</strong>.</p>
+        <p>Thông tin đăng nhập của bạn:</p>
+        <ul>
+            <li><strong>Email:</strong> {{ email }}</li>
+            <li><strong>Mật khẩu:</strong> {{ password }}</li>
+        </ul>
+        <p>Vui lòng <a href="{{ login_url }}" style="color: #007bff; text-decoration: none;">đăng nhập</a> và đổi mật khẩu ngay để đảm bảo an toàn.</p>
+        <p>Nếu bạn có bất kỳ câu hỏi nào, vui lòng liên hệ với chúng tôi qua email: <a href="mailto:support@dormitory.com" style="color: #007bff;">support@dormitory.com</a>.</p>
+        <p>Trân trọng,<br>Hệ thống Ký túc xá</p>
+    </div>
+</body>
+</html>

@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Xác nhận đăng ký phòng ký túc xá</title>
+</head>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+    <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+        <h2 style="color: #007bff;">Xác nhận đăng ký phòng ký túc xá</h2>
+        <p>Chào {{ name_student }},</p>
+        <p>Cảm ơn bạn đã đăng ký phòng tại <strong>Hệ thống Ký túc xá</strong>. Yêu cầu của bạn đã được ghi nhận với các thông tin sau:</p>
+        <ul>
+            <li><strong>Tên</strong>: {{ name_student }}</li>
+            <li><strong>Email</strong>: {{ email }}</li>
+            <li><strong>Số điện thoại</strong>: {{ phone_number }}</li>
+            <li><strong>Phòng</strong>: {{ room_name }}</li>
+            <li><strong>Số người đăng ký</strong>: {{ number_of_people }}</li>
+        </ul>
+        <p>Vui lòng theo dõi email để nhận thông báo về trạng thái đăng ký (được duyệt hay không) và các bước tiếp theo để ký hợp đồng.</p>
+        <p>Nếu có thắc mắc, vui lòng liên hệ qua <a href="mailto:support@dormitory.com" style="color: #007bff;">support@dormitory.com</a>.</p>
+        <p>Trân trọng,<br>Hệ thống Ký túc xá</p>
+    </div>
+</body>
+</html>

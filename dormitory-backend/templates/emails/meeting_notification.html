@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Thông báo thời gian gặp mặt</title>
+</head>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+    <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+        <h2 style="color: #007bff;">Thông báo thời gian gặp mặt</h2>
+        <p>Chào {{ name_student }},</p>
+        <p>Chúng tôi đã phê duyệt yêu cầu đăng ký phòng của bạn (Phòng: {{ room_name }}, {{ number_of_people }} người). Vui lòng đến gặp mặt để hoàn tất thủ tục vào thời gian sau:</p>
+        <ul>
+            <li><strong>Thời gian</strong>: {{ meeting_datetime }}</li>
+            <li><strong>Địa điểm</strong>: {{ meeting_location }}</li>
+        </ul>
+        <p>Nếu bạn có thắc mắc, vui lòng liên hệ qua <a href="mailto:support@dormitory.com" style="color: #007bff;">support@dormitory.com</a> hoặc số điện thoại: {{ phone_number }}.</p>
+        <p>Trân trọng,<br>Hệ thống Ký túc xá</p>
+    </div>
+</body>
+</html>
