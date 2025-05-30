@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Thanh toán thất bại</title>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            background: linear-gradient(135deg, #90CAF9, #F48FB1); /* Glassmorphism gradient */
+            font-family: 'Roboto', sans-serif;
+            overflow: hidden;
+        }
+        .container {
+            background: rgba(255, 255, 255, 0.9);
+            border-radius: 16px;
+            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.1);
+            padding: 32px;
+            max-width: 400px;
+            width: 90%;
+            text-align: center;
+            animation: fadeIn 0.5s ease-in-out;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .icon {
+            font-size: 80px;
+            color: #F44336; /* Red for failure */
+            margin-bottom: 16px;
+        }
+        h1 {
+            font-size: 28px;
+            font-weight: 700;
+            color: #333;
+            margin-bottom: 16px;
+        }
+        p {
+            font-size: 16px;
+            color: #666;
+            margin: 0;
+        }
+    </style>
+    <script>
+        window.onload = function() {
+            // Lấy tham số từ URL
+            const urlParams = new URLSearchParams(window.location.search);
+            const transactionId = urlParams.get('transaction_id');
+            const status = urlParams.get('status');
+            const bankCode = urlParams.get('bank_code');
+            const transactionNo = urlParams.get('transaction_no');
+            const payDate = urlParams.get('pay_date');
+            const amount = urlParams.get('amount');
+
+            // Gửi message về tab chính nếu cần
+            window.opener?.postMessage({
+                type: 'PAYMENT_RESULT',
+                transactionId: transactionId,
+                status: status,
+                bankCode: bankCode,
+                transactionNo: transactionNo,
+                payDate: payDate,
+                amount: amount
+            }, '*');
+
+            // Đóng tab sau 2 giây
+            setTimeout(() => {
+                window.close();
+            }, 2000);
+        };
+    </script>
+</head>
+<body>
+    <div class="container">
+        <span class="icon">❌</span>
+        <h1>Thanh toán thất bại!</h1>
+        <p>Vui lòng kiểm tra giao diện chính.</p>
+    </div>
+</body>
+</html>

@@ -14,12 +14,20 @@ import os
 from werkzeug.utils import secure_filename
 from datetime import datetime
 import uuid
+from unidecode import unidecode
+import re
 
 # Thiết lập logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 room_bp = Blueprint('room', __name__)
+
+# Hàm chuẩn hóa tên (loại bỏ dấu tiếng Việt và ký tự đặc biệt)
+def normalize_name(name):
+    normalized = unidecode(name)
+    normalized = re.sub(r'[^a-zA-Z0-9]', '_', normalized)
+    return normalized
 
 def update_current_person_number(room_id=None):
     """Cập nhật current_person_number hiệu quả cho một phòng hoặc tất cả phòng."""
@@ -31,28 +39,21 @@ def update_current_person_number(room_id=None):
             Contract.status == 'ACTIVE'
         ).group_by(
             Contract.room_id
-        ).all()
-        
-        count_dict = {room_id: count for room_id, count in contract_counts}
-        
+        ).subquery()
+
         if room_id:
-            room = Room.query.with_for_update().get(room_id)
-            if not room:
-                logger.warning(f"Room {room_id} not found")
-                return False
-            room.current_person_number = count_dict.get(room_id, 0)
-            room.status = 'OCCUPIED' if room.current_person_number >= room.capacity else 'AVAILABLE'
-            db.session.commit()
-            logger.info(f"Updated current_person_number for room {room_id}: {room.current_person_number}")
-            return True
+            rooms_query = Room.query.filter_by(room_id=room_id)
         else:
-            rooms = Room.query.with_for_update().all()
-            for room in rooms:
-                room.current_person_number = count_dict.get(room_id, 0)
-                room.status = 'OCCUPIED' if room.current_person_number >= room.capacity else 'AVAILABLE'
-            db.session.commit()
-            logger.info("Updated current_person_number for all rooms")
-            return True
+            rooms_query = Room.query
+
+        for room in rooms_query:
+            active_count = db.session.query(contract_counts.c.active_count).filter(contract_counts.c.room_id == room.room_id).scalar() or 0
+            room.current_person_number = active_count
+            room.status = 'OCCUPIED' if active_count >= room.capacity else 'AVAILABLE'
+
+        db.session.commit()
+        logger.info(f"Updated current_person_number for {'room ' + str(room_id) if room_id else 'all rooms'}")
+        return True
     except SQLAlchemyError as e:
         db.session.rollback()
         logger.error(f"Database error updating current_person_number: {str(e)}")
@@ -79,7 +80,7 @@ def get_rooms():
         search = request.args.get('search', '')
         area_id = request.args.get('area_id', type=int)
 
-        query = Room.query
+        query = Room.query.filter_by(is_deleted=False)
         if min_capacity:
             query = query.filter(Room.capacity >= min_capacity)
         if max_capacity:
@@ -113,7 +114,7 @@ def get_room_by_id(room_id):
         if not update_current_person_number(room_id):
             return jsonify({'message': 'Không tìm thấy phòng hoặc lỗi khi cập nhật số lượng người'}), 404
 
-        room = Room.query.get(room_id)
+        room = Room.query.filter_by(room_id=room_id, is_deleted=False).first()
         if room:
             return jsonify(room.to_dict()), 200
         return jsonify({'message': 'Không tìm thấy phòng'}), 404
@@ -121,10 +122,10 @@ def get_room_by_id(room_id):
         logger.error(f"Database error fetching room {room_id}: {str(e)}")
         return jsonify({'message': 'Lỗi database'}), 500
 
-# Tạo phòng mới và thêm ảnh (Admin)
 @room_bp.route('/admin/rooms', methods=['POST'])
 @admin_required()
 def create_room():
+    logger.info(f"Received request to /admin/rooms with method: {request.method}, Content-Type: {request.content_type}")
     try:
         if not request.content_type.startswith('multipart/form-data'):
             logger.warning("Yêu cầu không phải multipart/form-data")
@@ -136,6 +137,8 @@ def create_room():
         price = data.get('price', type=float)
         area_id = data.get('area_id', type=int)
         description = data.get('description')
+
+        logger.info(f"Request data: name={name}, capacity={capacity}, price={price}, area_id={area_id}, description={description}")
 
         if not all([name, capacity, price, area_id]):
             logger.warning("Thiếu thông tin bắt buộc: name, capacity, price, area_id")
@@ -163,29 +166,27 @@ def create_room():
         db.session.add(room)
         db.session.flush()  # Lấy room_id trước khi commit
 
-        # Xử lý ảnh
+        # Xử lý media
         files = request.files.getlist('images')
         if not files or all(file.filename == '' for file in files):
             logger.warning("Không có file media hợp lệ: room_id=%s", room.room_id)
 
-        max_images = 20
-        allowed_extensions = {'png', 'jpg', 'jpeg', 'gif'}
-        max_file_size = 10 * 1024 * 1024  # 10MB
+        max_media = 20
+        allowed_extensions = {'png', 'jpg', 'jpeg', 'gif', 'mp4', 'avi'}  # Thêm mp4, avi
+        max_file_size = 100 * 1024 * 1024  # 100MB
         saved_files = []
-        uploaded_images = []
+        uploaded_media = []
 
         if files:
-            if len(files) > max_images:
-                logger.warning(f"Too many images uploaded: {len(files)} > {max_images}")
-                return jsonify({'message': f'Chỉ được tải lên tối đa {max_images} ảnh'}), 400
+            if len(files) > max_media:
+                logger.warning(f"Too many media files uploaded: {len(files)} > {max_media}")
+                return jsonify({'message': f'Chỉ được tải lên tối đa {max_media} file'}), 400
 
-            # Tạo thư mục lưu trữ ảnh
-            roomname = f"{room.name} - {area.name}"
-            roomname = "".join(c if c.isalnum() or c in (' ', '-') else '_' for c in roomname)
-            upload_folder = os.path.join(current_app.config['ROOM_IMAGES_BASE'], roomname)
+            # Tạo thư mục lưu trữ media
+            upload_folder = os.path.join(current_app.config['ROOM_IMAGES_BASE'])
             os.makedirs(upload_folder, exist_ok=True)
 
-            # Kiểm tra file ảnh
+            # Kiểm tra file media
             for file in files:
                 if not file or not file.filename:
                     logger.warning("Empty file in upload list")
@@ -193,22 +194,24 @@ def create_room():
 
                 if '.' not in file.filename or file.filename.rsplit('.', 1)[1].lower() not in allowed_extensions:
                     logger.warning(f"Invalid file extension: {file.filename}")
-                    return jsonify({'message': f'File {file.filename}: Chỉ hỗ trợ định dạng png, jpg, jpeg, gif'}), 400
+                    return jsonify({'message': f'File {file.filename}: Chỉ hỗ trợ định dạng png, jpg, jpeg, gif, mp4, avi'}), 400
 
                 file.seek(0, os.SEEK_END)
                 file_size = file.tell()
                 if file_size > max_file_size:
                     logger.warning(f"File too large: {file.filename}, size: {file_size}")
-                    return jsonify({'message': f'File {file.filename}: Vượt quá kích thước tối đa 10MB'}), 400
+                    return jsonify({'message': f'File {file.filename}: Vượt quá kích thước tối đa 100MB'}), 400
                 file.seek(0)
 
-            # Lưu ảnh
+            # Lưu media
             primary_set = False
             for index, file in enumerate(files):
                 ext = file.filename.rsplit('.', 1)[1].lower()
                 filename = f"{uuid.uuid4().hex}.{ext}"
                 file_path = os.path.join(upload_folder, filename)
-                relative_path = os.path.join('roomimage', roomname, filename)
+                file.seek(0, os.SEEK_END)
+                file_size = file.tell()
+                file.seek(0)
 
                 file.save(file_path)
                 saved_files.append(file_path)
@@ -220,20 +223,23 @@ def create_room():
                 elif is_primary:
                     is_primary = False
 
-                image = RoomImage(
+                file_type = 'video' if ext in {'mp4', 'avi'} else 'image'
+                media = RoomImage(
                     room_id=room.room_id,
-                    image_url=relative_path,
+                    image_url=filename,
                     alt_text=data.get(f'alt_text_{index}', ''),
                     is_primary=is_primary,
                     sort_order=data.get(f'sort_order_{index}', index, type=int),
-                    uploaded_at=datetime.utcnow()
+                    uploaded_at=datetime.utcnow(),
+                    file_type=file_type,
+                    file_size=file_size
                 )
-                db.session.add(image)
-                uploaded_images.append(image)
+                db.session.add(media)
+                uploaded_media.append(media)
 
         try:
             db.session.commit()
-            logger.info(f"Created room {room.room_id} with {len(uploaded_images)} images")
+            logger.info(f"Created room {room.room_id} with {len(uploaded_media)} media files")
             return jsonify(room.to_dict()), 201
         except SQLAlchemyError as e:
             db.session.rollback()
@@ -249,14 +255,14 @@ def create_room():
                 if os.path.exists(file_path):
                     os.remove(file_path)
             logger.error(f"File system error creating room: {str(e)}")
-            return jsonify({'message': 'Lỗi hệ thống khi lưu file ảnh'}), 500
+            return jsonify({'message': 'Lỗi hệ thống khi lưu file media'}), 500
 
     except Exception as e:
         db.session.rollback()
         logger.error(f"Unexpected error creating room: {str(e)}")
         return jsonify({'message': 'Lỗi server không xác định'}), 500
 
-# Cập nhật phòng và quản lý ảnh (Admin)
+# Cập nhật phòng và quản lý media (Admin)
 @room_bp.route('/admin/rooms/<int:room_id>', methods=['PUT'])
 @admin_required()
 def update_room(room_id):
@@ -299,61 +305,56 @@ def update_room(room_id):
         room.status = status
         room.area_id = area_id
 
-        # Xử lý xóa ảnh
+        # Xử lý xóa media
         image_ids_to_delete = data.get('image_ids_to_delete', '').split(',')
         image_ids_to_delete = [int(id) for id in image_ids_to_delete if id.strip().isdigit()]
         if image_ids_to_delete:
-            images_to_delete = RoomImage.query.filter(
+            media_to_delete = RoomImage.query.filter(
                 RoomImage.image_id.in_(image_ids_to_delete),
                 RoomImage.room_id == room_id,
                 RoomImage.is_deleted == False
             ).all()
             roomname = f"{room.name} - {area.name}"
             roomname = "".join(c if c.isalnum() or c in (' ', '-') else '_' for c in roomname)
-            # Sử dụng UPLOAD_BASE từ cấu hình, với giá trị mặc định
-            base_upload_path = current_app.config.get('UPLOAD_BASE', os.path.join(current_app.root_path, 'Uploads'))
-            trash_folder = os.path.join(base_upload_path, 'trash', 'roomimage', roomname)
+            trash_folder = os.path.join(current_app.config['UPLOAD_BASE'], 'trash', 'roomimage', roomname)
             os.makedirs(trash_folder, exist_ok=True)
 
-            for image in images_to_delete:
-                image.is_deleted = True
-                image.deleted_at = datetime.utcnow()
-                # Điều chỉnh đường dẫn gốc của ảnh
-                relative_image_path = image.image_url.replace('roomimage/', '')
-                absolute_path = os.path.join(current_app.config['ROOM_IMAGES_BASE'], relative_image_path)
+            for media in media_to_delete:
+                media.is_deleted = True
+                media.deleted_at = datetime.utcnow()
+                absolute_path = os.path.join(current_app.config['ROOM_IMAGES_BASE'], media.image_url)
                 if os.path.exists(absolute_path):
-                    trash_filename = f"{uuid.uuid4().hex}_{os.path.basename(image.image_url)}"
+                    trash_filename = f"{uuid.uuid4().hex}_{os.path.basename(media.image_url)}"
                     trash_path = os.path.join(trash_folder, trash_filename)
                     try:
                         os.rename(absolute_path, trash_path)
-                        logger.info(f"Moved image {image.image_url} to trash: {trash_path}")
+                        logger.info(f"Moved media {media.image_url} to trash: {trash_path}")
                     except OSError as e:
-                        logger.warning(f"Failed to move image to trash: {image.image_url}, error: {str(e)}")
-                        # Không trả về lỗi, tiếp tục soft delete
+                        logger.warning(f"Failed to move media to trash: {media.image_url}, error: {str(e)}")
                 else:
-                    logger.warning(f"Image file not found: {absolute_path}")
-                logger.debug("Soft delete image: image_id=%s", image.image_id)
+                    logger.warning(f"Media file not found: {absolute_path}")
+                logger.debug("Soft delete media: image_id=%s", media.image_id)
 
-        # Xử lý thêm ảnh mới
+        # Xử lý thêm media mới
         files = request.files.getlist('images')
-        current_image_count = RoomImage.query.filter_by(
+        current_media_count = RoomImage.query.filter_by(
             room_id=room_id,
             is_deleted=False
         ).count()
-        max_images = 20
-        if len(files) + current_image_count > max_images:
-            logger.warning(f"Too many images: {len(files) + current_image_count} > {max_images}")
-            return jsonify({'message': f'Tổng số ảnh (hiện tại + mới) không được vượt quá {max_images}'}), 400
+        max_media = 20
+        if len(files) + current_media_count > max_media:
+            logger.warning(f"Too many media files: {len(files) + current_media_count} > {max_media}")
+            return jsonify({'message': f'Tổng số file (hiện tại + mới) không được vượt quá {max_media}'}), 400
 
-        allowed_extensions = {'png', 'jpg', 'jpeg', 'gif'}
-        max_file_size = 10 * 1024 * 1024  # 10MB
+        allowed_extensions = {'png', 'jpg', 'jpeg', 'gif', 'mp4', 'avi'}  # Thêm mp4, avi
+        max_file_size = 100 * 1024 * 1024  # 100MB
         saved_files = []
-        uploaded_images = []
+        uploaded_media = []
 
         if files:
             roomname = f"{room.name} - {area.name}"
             roomname = "".join(c if c.isalnum() or c in (' ', '-') else '_' for c in roomname)
-            upload_folder = os.path.join(current_app.config['ROOM_IMAGES_BASE'], roomname)
+            upload_folder = os.path.join(current_app.config['ROOM_IMAGES_BASE'])
             os.makedirs(upload_folder, exist_ok=True)
 
             for file in files:
@@ -363,21 +364,23 @@ def update_room(room_id):
 
                 if '.' not in file.filename or file.filename.rsplit('.', 1)[1].lower() not in allowed_extensions:
                     logger.warning(f"Invalid file extension: {file.filename}")
-                    return jsonify({'message': f'File {file.filename}: Chỉ hỗ trợ định dạng png, jpg, jpeg, gif'}), 400
+                    return jsonify({'message': f'File {file.filename}: Chỉ hỗ trợ định dạng png, jpg, jpeg, gif, mp4, avi'}), 400
 
                 file.seek(0, os.SEEK_END)
                 file_size = file.tell()
                 if file_size > max_file_size:
                     logger.warning(f"File too large: {file.filename}, size: {file_size}")
-                    return jsonify({'message': f'File {file.filename}: Vượt quá kích thước tối đa 10MB'}), 400
+                    return jsonify({'message': f'File {file.filename}: Vượt quá kích thước tối đa 100MB'}), 400
                 file.seek(0)
 
-            primary_set = current_image_count > 0 and RoomImage.query.filter_by(room_id=room_id, is_primary=True, is_deleted=False).first()
+            primary_set = current_media_count > 0 and RoomImage.query.filter_by(room_id=room_id, is_primary=True, is_deleted=False).first()
             for index, file in enumerate(files):
                 ext = file.filename.rsplit('.', 1)[1].lower()
                 filename = f"{uuid.uuid4().hex}.{ext}"
                 file_path = os.path.join(upload_folder, filename)
-                relative_path = os.path.join('roomimage', roomname, filename)
+                file.seek(0, os.SEEK_END)
+                file_size = file.tell()
+                file.seek(0)
 
                 file.save(file_path)
                 saved_files.append(file_path)
@@ -389,20 +392,23 @@ def update_room(room_id):
                 elif is_primary:
                     is_primary = False
 
-                image = RoomImage(
+                file_type = 'video' if ext in {'mp4', 'avi'} else 'image'
+                media = RoomImage(
                     room_id=room_id,
-                    image_url=relative_path,
+                    image_url=filename,
                     alt_text=data.get(f'alt_text_{index}', ''),
                     is_primary=is_primary,
-                    sort_order=data.get(f'sort_order_{index}', index + current_image_count, type=int),
-                    uploaded_at=datetime.utcnow()
+                    sort_order=data.get(f'sort_order_{index}', index + current_media_count, type=int),
+                    uploaded_at=datetime.utcnow(),
+                    file_type=file_type,
+                    file_size=file_size
                 )
-                db.session.add(image)
-                uploaded_images.append(image)
+                db.session.add(media)
+                uploaded_media.append(media)
 
         try:
             db.session.commit()
-            logger.info(f"Updated room {room_id} with {len(uploaded_images)} new images")
+            logger.info(f"Updated room {room_id} with {len(uploaded_media)} new media files")
             return jsonify(room.to_dict()), 200
         except SQLAlchemyError as e:
             db.session.rollback()
@@ -418,7 +424,7 @@ def update_room(room_id):
                 if os.path.exists(file_path):
                     os.remove(file_path)
             logger.error(f"File system error updating room {room_id}: {str(e)}")
-            return jsonify({'message': 'Lỗi hệ thống khi lưu file ảnh'}), 500
+            return jsonify({'message': 'Lỗi hệ thống khi lưu file media'}), 500
 
     except Exception as e:
         db.session.rollback()
@@ -477,6 +483,7 @@ def delete_room(room_id):
             logger.warning("Cannot delete room with pending reports: room_id=%s", room_id)
             return jsonify({'message': 'Không thể xóa phòng vì vẫn còn báo cáo chưa giải quyết'}), 400
 
+        # Xóa mềm các ảnh liên quan
         room_images = RoomImage.query.filter_by(room_id=room_id).all()
         for image in room_images:
             image.is_deleted = True
@@ -484,21 +491,25 @@ def delete_room(room_id):
             image.room_id = None
             logger.debug("Marked RoomImage as deleted: image_id=%s, room_id=None", image.image_id)
 
-        db.session.delete(room)
+        # Xóa mềm phòng
+        room.is_deleted = True
+        room.deleted_at = datetime.utcnow()
+        logger.debug(f"Marked Room as deleted: room_id={room_id}")
+
         try:
             db.session.commit()
-            logger.info("Room deleted and associated images marked as deleted: room_id=%s", room_id)
+            logger.info(f"Room soft deleted: room_id={room_id}")
             return jsonify({'message': 'Xóa phòng thành công'}), 200
         except IntegrityError as e:
             db.session.rollback()
-            logger.error("Integrity error deleting room: room_id=%s, error=%s", room_id, str(e))
+            logger.error(f"Integrity error deleting room: room_id={room_id}, error={str(e)}")
             return jsonify({'message': 'Lỗi cơ sở dữ liệu: Không thể xóa phòng do ràng buộc dữ liệu'}), 409
         except SQLAlchemyError as e:
             db.session.rollback()
-            logger.error("Database error deleting room: room_id=%s, error=%s", room_id, str(e))
+            logger.error(f"Database error deleting room: room_id={room_id}, error={str(e)}")
             return jsonify({'message': 'Lỗi cơ sở dữ liệu khi xóa phòng'}), 500
 
     except Exception as e:
         db.session.rollback()
-        logger.error("Unexpected error deleting room: room_id=%s, error=%s", room_id, str(e))
+        logger.error(f"Unexpected error deleting room: room_id={room_id}, error={str(e)}")
         return jsonify({'message': 'Lỗi server không xác định', 'error': str(e)}), 500

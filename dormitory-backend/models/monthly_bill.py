@@ -16,9 +16,14 @@ class MonthlyBill(db.Model):
     
     user = db.relationship('User', back_populates='bills', lazy=True)
     room = db.relationship('Room', back_populates='bills', lazy=True)
-    bill_detail = db.relationship('BillDetail', back_populates='monthly_bill', uselist=False, lazy=True)
+    bill_detail = db.relationship('BillDetail', back_populates='monthly_bill', uselist=False, lazy='joined')
 
     def to_dict(self):
+        # Lấy service_name từ bill_detail → rate → service
+        service_name = None
+        if self.bill_detail and self.bill_detail.rate and self.bill_detail.rate.service:
+            service_name = self.bill_detail.rate.service.name
+
         return {
             'bill_id': self.bill_id,
             'user_id': self.user_id,
@@ -40,5 +45,6 @@ class MonthlyBill(db.Model):
                 'room_id': self.room.room_id,
                 'name': self.room.name
             } if self.room else None,
-            'bill_detail_id': self.bill_detail.detail_id if self.bill_detail else None  # Chỉ lấy detail_id, không gọi to_dict()
+            'bill_detail_id': self.bill_detail.detail_id if self.bill_detail else None,
+            'service_name': service_name  # Thêm service_name
         }

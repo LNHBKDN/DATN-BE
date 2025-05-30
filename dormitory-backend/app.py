@@ -1,6 +1,7 @@
+import datetime
 import os
 import logging
-from flask import Flask, jsonify, send_from_directory
+from flask import Flask, jsonify, send_from_directory, request
 from extensions import db, migrate, jwt, mail, limiter
 from config import Config
 from dotenv import load_dotenv
@@ -9,11 +10,19 @@ from flask_swagger_ui import get_swaggerui_blueprint
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_caching import Cache
+from flask_cors import CORS
 from celery import Celery
+from models.refresh_tokens import RefreshToken  # Import RefreshToken model
+import firebase_admin
+from firebase_admin import credentials, messaging
 
 # Load biến môi trường từ file .env
 dotenv_path = Path(__file__).resolve().parent / '.env'
 load_dotenv(dotenv_path)
+
+# Khởi tạo Firebase Admin SDK
+cred = credentials.Certificate('firebase-adminsdk.json')
+firebase_admin.initialize_app(cred)
 
 # Khởi tạo ứng dụng Flask
 app = Flask(__name__)
@@ -23,8 +32,17 @@ logging.basicConfig(
     filename='app.log',
     level=logging.INFO,
     format='%(asctime)s %(levelname)s: %(message)s',
-    encoding='utf-8'  # Thêm encoding UTF-8
+    encoding='utf-8'
 )
+
+# Cấu hình CORS
+CORS(app, resources={r"/api/*": {
+    "origins": "*",
+    "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    "allow_headers": ["Content-Type", "Authorization", "Range"],
+    "expose_headers": ["Content-Range", "Accept-Ranges"],
+    "supports_credentials": False,
+}})
 
 # Khởi tạo Celery
 celery = Celery(app.name, broker='redis://localhost:6379/0')
@@ -40,12 +58,10 @@ swaggerui_blueprint = get_swaggerui_blueprint(
 
 # Thêm cấu hình upload
 app.config['ALLOWED_EXTENSIONS'] = {'png', 'jpg', 'jpeg', 'gif'}
-app.config['AVATAR_UPLOAD_FOLDER'] = 'C:/Users/ACER/Desktop/NET/DATN/dormitory-backend/Uploads/avatars'
-app.config['TRASH_BASE'] = 'C:/Users/ACER/Desktop/NET/DATN/dormitory-backend/Uploads/trash'
 app.config['MAX_FILE_SIZE'] = 5 * 1024 * 1024  # 5MB
 
-# Cấu hình Flask-Caching
-cache = Cache(config={'CACHE_TYPE': 'redis', 'CACHE_REDIS_URL': 'redis://localhost:6379/0'})
+# Cấu hình Flask-Caching với Redis database 1
+cache = Cache(config={'CACHE_TYPE': 'redis', 'CACHE_REDIS_URL': 'redis://localhost:6379/1'})
 cache.init_app(app)
 
 app.register_blueprint(swaggerui_blueprint, url_prefix=SWAGGER_URL)
@@ -66,11 +82,17 @@ limiter.init_app(app)
 # Cấu hình thư mục upload gốc
 UPLOAD_BASE = os.path.join(app.root_path, 'Uploads')
 os.makedirs(UPLOAD_BASE, exist_ok=True)
+app.config['UPLOAD_BASE'] = UPLOAD_BASE
 
 # Thư mục cho report_images
 REPORT_IMAGES_FOLDER = os.path.join(UPLOAD_BASE, 'report_images')
 os.makedirs(REPORT_IMAGES_FOLDER, exist_ok=True)
 app.config['REPORT_IMAGES_FOLDER'] = REPORT_IMAGES_FOLDER
+
+# Thư mục cho notification_media
+NOTIFICATION_MEDIA_BASE = os.path.join(UPLOAD_BASE, 'notification_media')
+os.makedirs(NOTIFICATION_MEDIA_BASE, exist_ok=True)
+app.config['NOTIFICATION_MEDIA_BASE'] = NOTIFICATION_MEDIA_BASE
 
 # Thư mục gốc cho roomimage
 ROOM_IMAGES_BASE = os.path.join(UPLOAD_BASE, 'roomimage')
@@ -129,6 +151,8 @@ from controllers.payment_transaction_controller import payment_transaction_bp
 from controllers.report_type_controller import report_type_bp
 from controllers.notification_type_controller import notification_type_bp
 from controllers.notification_media_controller import notification_media_bp
+from controllers.statistics_controller import statistics_bp
+
 # Register blueprints
 app.register_blueprint(auth_bp, url_prefix='/api')
 app.register_blueprint(user_bp, url_prefix='/api')
@@ -144,19 +168,110 @@ app.register_blueprint(notification_bp, url_prefix='/api')
 app.register_blueprint(service_rate_bp, url_prefix='/api')
 app.register_blueprint(service_bp, url_prefix='/api')
 app.register_blueprint(notification_media_bp, url_prefix='/api')
-
 app.register_blueprint(notification_recipient_bp, url_prefix='/api')
-
-# Đăng ký blueprint cho các controller
 app.register_blueprint(monthly_bill_bp, url_prefix='/api')
 app.register_blueprint(payment_transaction_bp, url_prefix='/api')
 app.register_blueprint(report_type_bp, url_prefix='/api')
 app.register_blueprint(notification_type_bp, url_prefix='/api')
+app.register_blueprint(statistics_bp, url_prefix='/api')
+
+# Debug route to list all registered routes
+@app.route('/debug/routes')
+def debug_routes():
+    routes = []
+    for rule in app.url_map.iter_rules():
+        routes.append({
+            'endpoint': rule.endpoint,
+            'methods': list(rule.methods),
+            'rule': rule.rule
+        })
+    logger.info("Registered routes: %s", routes)
+    return jsonify(routes)
+
+# Route phục vụ file tĩnh cho roomimage
+@app.route('/api/roomimage/<path:filename>')
+def serve_room_image(filename):
+    logger.info(f"Serving room image: {filename}")
+    full_path = os.path.join(app.config['ROOM_IMAGES_BASE'], filename)
+    logger.info(f"Full path: {full_path}")
+    try:
+        if not os.path.exists(full_path):
+            logger.error(f"File does not exist: {full_path}")
+            return jsonify({'message': f'Không tìm thấy hình ảnh: {filename}'}), 404
+        logger.info(f"Serving file: {full_path}")
+        return send_from_directory(app.config['ROOM_IMAGES_BASE'], filename)
+    except Exception as e:
+        logger.error(f"Error serving room image {filename}: {str(e)}")
+        return jsonify({'message': f'Không tìm thấy hình ảnh: {filename}'}), 404
+
+# Route phục vụ file tĩnh cho reportimage
+@app.route('/api/reportimage/<path:filename>')
+def serve_report_image(filename):
+    logger.info(f"Serving report image: {filename}")
+    full_path = os.path.join(app.config['REPORT_IMAGES_FOLDER'], filename)
+    logger.info(f"Full path: {full_path}")
+    try:
+        if not os.path.exists(full_path):
+            logger.error(f"File does not exist: {full_path}")
+            return jsonify({'message': f'Không tìm thấy tệp: {filename}'}), 404
+        logger.info(f"Serving file: {full_path}")
+        response = send_from_directory(app.config['REPORT_IMAGES_FOLDER'], filename)
+        if filename.lower().endswith(('.mp4', '.avi')):
+            response.headers['Content-Disposition'] = 'inline'
+            response.headers['Accept-Ranges'] = 'bytes'
+        return response
+    except Exception as e:
+        logger.error(f"Error serving report image {filename}: {str(e)}")
+        return jsonify({'message': f'Không tìm thấy tệp: {filename}'}), 404
+
+# Route phục vụ file tĩnh cho notification media
+@app.route('/api/notification_media/<path:filename>')
+def serve_noti_image(filename):
+    logger.info(f"Serving notification media: {filename}")
+    full_path = os.path.join(app.config['NOTIFICATION_MEDIA_BASE'], filename)
+    logger.info(f"Full path: {full_path}")
+    try:
+        if not os.path.exists(full_path):
+            logger.error(f"File does not exist: {full_path}")
+            return jsonify({'message': f'Không tìm thấy tệp: {filename}'}), 404
+        logger.info(f"Serving file: {full_path}")
+        response = send_from_directory(app.config['NOTIFICATION_MEDIA_BASE'], filename)
+        if filename.lower().endswith(('.mp4', '.avi')):
+            response.headers['Content-Disposition'] = 'inline'
+            response.headers['Accept-Ranges'] = 'bytes'
+        return response
+    except Exception as e:
+        logger.error(f"Error serving notification media {filename}: {str(e)}")
+        return jsonify({'message': f'Không tìm thấy tệp: {filename}'}), 404
+
+# Route phục vụ file tĩnh cho avatar
+@app.route('/api/avatars/<path:filename>')
+def serve_avatar(filename):
+    logger.info(f"Serving avatar: {filename}")
+    full_path = os.path.join(app.config['AVATAR_UPLOAD_FOLDER'], filename)
+    logger.info(f"Full path: {full_path}")
+    try:
+        if not os.path.exists(full_path):
+            logger.error(f"File does not exist: {full_path}")
+            return jsonify({'message': f'Không tìm thấy ảnh: {filename}'}), 404
+        logger.info(f"Serving file: {full_path}")
+        return send_from_directory(app.config['AVATAR_UPLOAD_FOLDER'], filename)
+    except Exception as e:
+        logger.error(f"Error serving avatar {filename}: {str(e)}")
+        return jsonify({'message': f'Không tìm thấy ảnh: {filename}'}), 404
 
 # Route phục vụ file tĩnh
 @app.route('/uploads/<path:filename>')
 def uploaded_file(filename):
     return send_from_directory(UPLOAD_BASE, filename)
+
+# Log tất cả các yêu cầu
+@app.before_request
+def log_request():
+    logger.info(f"Before request: method={request.method}, url={request.url}, headers={request.headers}")
+    if request.method == 'OPTIONS':
+        logger.info("Handling OPTIONS preflight request")
+        return '', 200
 
 # Error handlers
 @app.errorhandler(404)
@@ -170,26 +285,53 @@ def internal_error(error):
     logger.error("500 Error: %s", str(error))
     return jsonify({'message': 'Internal server error'}), 500
 
+@app.errorhandler(401)
+def unauthorized(error):
+    logger.error("401 Error: %s", str(error))
+    return jsonify({'message': 'Unauthorized'}), 401
+
+@app.errorhandler(403)
+def forbidden(error):
+    logger.error("403 Error: %s", str(error))
+    return jsonify({'message': 'Forbidden'}), 403
+
 from scheduler import init_scheduler
 init_scheduler(db)
 
 @jwt.token_in_blocklist_loader
 def check_if_token_revoked(jwt_header, jwt_payload):
     try:
-        from models.token_blacklist import TokenBlacklist
         jti = jwt_payload['jti']
-        token = TokenBlacklist.query.filter_by(jti=jti).first()
-        if token:
-            logger.debug("Token %s đã bị vô hiệu hóa", jti)
-            return True
-        logger.debug("Token %s không có trong danh sách đen", jti)
+        token_type = jwt_payload.get('type')  # 'access' or 'refresh'
+
+        # Check access token in TokenBlacklist
+        if token_type == 'access':
+            from models.token_blacklist import TokenBlacklist
+            token = TokenBlacklist.query.filter_by(jti=jti).first()
+            if token:
+                logger.debug("Access token %s đã bị vô hiệu hóa", jti)
+                return True
+            logger.debug("Access token %s không có trong danh sách đen", jti)
+
+        # Check refresh token in RefreshToken
+        if token_type == 'refresh':
+            refresh_token = RefreshToken.query.filter_by(jti=jti).first()
+            if refresh_token:
+                if refresh_token.revoked_at or refresh_token.expires_at < datetime.utcnow():
+                    logger.debug("Refresh token %s đã bị thu hồi hoặc hết hạn", jti)
+                    return True
+                logger.debug("Refresh token %s hợp lệ", jti)
+            else:
+                logger.debug("Refresh token %s không tồn tại", jti)
+                return True
+
         return False
     except Exception as e:
         logger.error("Lỗi khi kiểm tra blacklist token: %s", str(e))
-        return False
+        return True  # Fail-safe: assume token is invalid if there's an error
 
 if __name__ == '__main__':
     if os.getenv('FLASK_ENV') == 'development':
-        app.run(debug=True)
+        app.run(debug=True, host='127.0.0.1', port=5000)
     else:
-        app.run()
+        app.run(host='0.0.0.0', port=5000)

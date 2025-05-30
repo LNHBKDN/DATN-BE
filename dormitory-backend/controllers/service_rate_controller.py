@@ -3,7 +3,8 @@ from extensions import db
 from models.service import Service
 from models.service_rate import ServiceRate
 from controllers.auth_controller import admin_required
-from datetime import datetime
+from datetime import datetime, date
+from dateutil.relativedelta import relativedelta
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -114,10 +115,20 @@ def create_service_rate():
         except ValueError:
             return jsonify({'message': 'Định dạng effective_date không hợp lệ (YYYY-MM-DD)'}), 400
 
-        # Ràng buộc kinh doanh: Không cho phép ngày quá xa trong quá khứ (tùy chọn)
+        # Ràng buộc kinh doanh: Không cho phép ngày quá xa trong quá khứ
         min_date = date(2020, 1, 1)  # Có thể điều chỉnh theo yêu cầu
         if effective_date < min_date:
             return jsonify({'message': f'effective_date không được trước {min_date}'}), 400
+
+        # Kiểm tra: effective_date phải là ngày 1 của tháng
+        if effective_date.day != 1:
+            return jsonify({'message': 'Ngày áp dụng phải là ngày 1 của tháng'}), 400
+
+        # Kiểm tra: effective_date không được nằm trong tháng hiện tại
+        today = datetime.today().date()
+        first_day_of_next_month = (today.replace(day=1) + relativedelta(months=1)).replace(day=1)
+        if effective_date < first_day_of_next_month:
+            return jsonify({'message': f'Ngày áp dụng phải từ {first_day_of_next_month.strftime("%Y-%m-%d")} trở đi (không được nằm trong tháng hiện tại)'}), 400
 
         # Kiểm tra xung đột giá
         existing_rate = ServiceRate.query.filter_by(
@@ -145,8 +156,6 @@ def create_service_rate():
     except Exception as e:
         logging.error(f"Error in create_service_rate: {str(e)}")
         return jsonify({'message': 'Lỗi khi tạo mức giá', 'error': str(e)}), 500
-
-
 
 # Xóa mức giá (Admin)
 @service_rate_bp.route('/service-rates/<int:rate_id>', methods=['DELETE'])

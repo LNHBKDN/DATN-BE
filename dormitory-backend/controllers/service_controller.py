@@ -8,7 +8,7 @@ service_bp = Blueprint('service', __name__)
 
 # Lấy danh sách tất cả dịch vụ (Admin)
 @service_bp.route('/services', methods=['GET'])
-@admin_required()
+
 def get_all_services():
     page = request.args.get('page', 1, type=int)
     limit = request.args.get('limit', 10, type=int)

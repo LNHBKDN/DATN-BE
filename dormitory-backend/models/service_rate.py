@@ -15,5 +15,6 @@ class ServiceRate(db.Model):
             'rate_id': self.rate_id,
             'unit_price': str(self.unit_price),
             'effective_date': self.effective_date.isoformat() if self.effective_date else None,
-            'service_id': self.service_id
+            'service_id': self.service_id,
+            'service_name': self.service.name if self.service else None  # Thêm service_name
         }

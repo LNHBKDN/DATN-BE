@@ -5,14 +5,18 @@ from extensions import db
 from models.contract import Contract
 from models.user import User
 from models.room import Room
+from models.notification import Notification  # Import Notification model
 from controllers.auth_controller import admin_required, user_required
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.exc import SQLAlchemyError
 import logging
 from json import JSONEncoder
 from dateutil.parser import parse as parse_date
+from sqlalchemy.sql import func
+import pendulum  # Thêm thư viện pendulum để xử lý múi giờ
 
+from utils.fcm import send_fcm_notification
 # Thiết lập logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -30,34 +34,43 @@ class CustomJSONEncoder(JSONEncoder):
             return str(obj)
         return super().default(obj)
 
-def update_current_person_number(room_ids=None):
-    """Cập nhật current_person_number cho một hoặc nhiều phòng."""
+def update_contract_status():
+    """Cập nhật trạng thái cho các hợp đồng có khả năng thay đổi trạng thái."""
     try:
-        if room_ids:
-            room_ids = set(room_ids) if isinstance(room_ids, (list, set)) else {room_ids}
-            for room_id in room_ids:
-                room = Room.query.with_for_update().get(room_id)
-                if not room:
-                    logger.warning(f"Room {room_id} not found")
-                    return False
-                active_contracts = Contract.query.filter_by(room_id=room_id, status='ACTIVE').count()
-                room.current_person_number = active_contracts
-                room.status = 'OCCUPIED' if active_contracts >= room.capacity else 'AVAILABLE'
-                logger.debug(f"Updated current_person_number for room {room_id}: {active_contracts}")
-        else:
-            rooms = Room.query.with_for_update().all()
-            for room in rooms:
-                active_contracts = Contract.query.filter_by(room_id=room.room_id, status='ACTIVE').count()
-                room.current_person_number = active_contracts
-                room.status = 'OCCUPIED' if active_contracts >= room.capacity else 'AVAILABLE'
-                logger.debug(f"Updated current_person_number for room {room.room_id}: {active_contracts}")
-        return True
-    except SQLAlchemyError as e:
-        logger.error(f"Database error updating current_person_number: {str(e)}")
-        return False
+        with current_app.app_context():
+            # Sử dụng múi giờ Việt Nam (Asia/Ho_Chi_Minh) thay vì UTC
+            now = pendulum.now('Asia/Ho_Chi_Minh').date()
+            window_start = now - timedelta(hours=2)
+            window_end = now + timedelta(hours=2)
+            contracts = Contract.query.filter(
+                (
+                    (Contract.start_date >= window_start) & (Contract.start_date <= window_end)
+                ) | (
+                    (Contract.end_date >= window_start) & (Contract.end_date <= window_end)
+                ) | (
+                    Contract.status.in_(['PENDING', 'ACTIVE'])
+                )
+            ).all()
+            updated_count = 0
+            for contract in contracts:
+                try:
+                    if not contract.start_date or not contract.end_date:
+                        logger.warning(f"Contract {contract.contract_id} has invalid start_date or end_date")
+                        continue
+                    old_status = contract.status
+                    contract.update_status()
+                    if old_status != contract.status:
+                        updated_count += 1
+                        logger.debug(f"Updated contract {contract.contract_id} status from {old_status} to {contract.status}")
+                except Exception as e:
+                    logger.error(f"Error updating contract {contract.contract_id}: {str(e)}")
+                    continue
+            db.session.commit()
+            logger.info(f"Updated status for {updated_count} contracts")
     except Exception as e:
-        logger.error(f"Unexpected error updating current_person_number: {str(e)}")
-        return False
+        db.session.rollback()
+        logger.error(f"Error during contract status update: {str(e)}")
+        raise  # Ném lại lỗi để endpoint xử lý
 
 # Lấy danh sách tất cả hợp đồng (Admin)
 @contract_bp.route('/contracts', methods=['GET'])
@@ -219,35 +232,40 @@ def create_contract():
         if not data:
             return jsonify({'message': 'Dữ liệu JSON không hợp lệ'}), 400
 
-        user_id = data.get('user_id')
-        room_id = data.get('room_id')
+        email = data.get('email')
+        room_name = data.get('room_name')
+        area_id = data.get('area_id')
         start_date = data.get('start_date')
         end_date = data.get('end_date')
         contract_type = data.get('contract_type')
 
-        if not all([user_id, room_id, start_date, end_date, contract_type]):
-            return jsonify({'message': 'Yêu cầu user_id, room_id, start_date, end_date và contract_type'}), 400
+        if not all([email, room_name, area_id, start_date, end_date, contract_type]):
+            return jsonify({'message': 'Yêu cầu email, room_name, area_id, start_date, end_date và contract_type'}), 400
 
-        if not User.query.get(user_id):
-            return jsonify({'message': 'Không tìm thấy người dùng'}), 404
-        room = Room.query.get(room_id)
+        user = User.query.filter_by(email=email).first()
+        if not user:
+            return jsonify({'message': 'Không tìm thấy người dùng với email này'}), 404
+        user_id = user.user_id
+
+        room = Room.query.filter_by(name=room_name, area_id=area_id).first()
         if not room:
-            return jsonify({'message': 'Không tìm thấy phòng'}), 404
+            return jsonify({'message': 'Không tìm thấy phòng với tên và khu vực này'}), 404
+        room_id = room.room_id
 
         try:
-            start_date = datetime.strptime(start_date, '%Y-%m-%d').date()
-            end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
+            start_date = parse_date(start_date).date()
+            end_date = parse_date(end_date).date()
             if start_date >= end_date:
                 return jsonify({'message': 'Ngày bắt đầu phải trước ngày kết thúc'}), 400
-            if start_date < date.today():
-                return jsonify({'message': 'Không thể tạo hợp đồng trong quá khứ'}), 400
+            today = pendulum.now('Asia/Ho_Chi_Minh').date()
+            if start_date < today:
+                return jsonify({'message': 'Ngày bắt đầu không được là ngày trong quá khứ'}), 400
         except ValueError:
             return jsonify({'message': 'Định dạng ngày không hợp lệ (YYYY-MM-DD)'}), 400
 
         if contract_type not in ['SHORT_TERM', 'LONG_TERM']:
             return jsonify({'message': 'Loại hợp đồng phải là SHORT_TERM hoặc LONG_TERM'}), 400
 
-        # Kiểm tra xem người dùng đã có hợp đồng nào chưa
         existing_contract = Contract.query.filter_by(user_id=user_id).first()
         if existing_contract:
             return jsonify({'message': 'Người dùng đã có hợp đồng, không thể tạo hợp đồng mới'}), 400
@@ -262,19 +280,57 @@ def create_contract():
             start_date=start_date,
             end_date=end_date,
             contract_type=contract_type,
-            status='PENDING' if start_date > date.today() else 'ACTIVE'
+            status='PENDING' if start_date > today else 'ACTIVE'
         )
         db.session.add(contract)
-        if not update_current_person_number(room_id):
-            db.session.rollback()
-            return jsonify({'message': 'Lỗi khi cập nhật số người trong phòng'}), 500
+
+        if contract.status == 'ACTIVE':
+            room.current_person_number += 1
+            room.status = 'OCCUPIED' if room.current_person_number >= room.capacity else 'AVAILABLE'
+            logger.debug(f"Updated current_person_number for room {room_id}: {room.current_person_number}")
+
         db.session.commit()
         logger.info(f"Contract created with contract_id={contract.contract_id}")
+
+        # Create SYSTEM notification
+        try:
+            notification = Notification(
+                title="Hợp đồng mới đã được tạo",
+                message="Hợp đồng của bạn đã được tạo thành công. Vui lòng xem chi tiết trong phần cài đặt.",
+                target_type="SYSTEM",
+                target_id=user_id,
+                related_entity_type="CONTRACT",
+                related_entity_id=contract.contract_id,
+                created_at=datetime.utcnow()
+            )
+            db.session.add(notification)
+            db.session.flush()
+            recipient = NotificationRecipient(
+                notification_id=notification.id,
+                user_id=user_id,
+                is_read=False
+            )
+            db.session.add(recipient)
+            send_fcm_notification(
+                user_id=user_id,
+                title=notification.title,
+                message=notification.message,
+                data={
+                    'notification_id': str(notification.id),
+                    'related_entity_type': 'CONTRACT',
+                    'related_entity_id': str(contract.contract_id)
+                }
+            )
+            db.session.commit()
+            logger.info(f"Notification created for user {user_id}, notification_id={notification.id}")
+        except Exception as e:
+            db.session.rollback()
+            logger.error(f"Failed to create SYSTEM notification for user {user_id}, contract {contract.contract_id}: {str(e)}")
 
         return jsonify(contract.to_dict()), 201
     except IntegrityError:
         db.session.rollback()
-        logger.error(f"Failed to create contract for user_id={user_id}, room_id={room_id}")
+        logger.error(f"Failed to create contract for email={email}, room_name={room_name}")
         return jsonify({'message': 'Xung đột khi tạo hợp đồng, vui lòng thử lại'}), 409
     except ValueError as e:
         db.session.rollback()
@@ -300,22 +356,25 @@ def update_contract(contract_id):
             return jsonify({'message': 'Dữ liệu JSON không hợp lệ'}), 400
 
         original_room_id = contract.room_id
+        original_status = contract.status
         room_ids_to_update = {original_room_id}  # Tập hợp các room_id cần cập nhật
 
-        if 'user_id' in data:
-            user = User.query.get(data['user_id'])
+        if 'email' in data:
+            user = User.query.filter_by(email=data['email']).first()
             if not user:
-                logger.info(f"User {data['user_id']} not found")
-                return jsonify({'message': 'Không tìm thấy người dùng'}), 404
-            contract.user_id = data['user_id']
+                logger.info(f"User with email {data['email']} not found")
+                return jsonify({'message': 'Không tìm thấy người dùng với email này'}), 404
+            contract.user_id = user.user_id
 
-        if 'room_id' in data:
-            room = Room.query.get(data['room_id'])
+        if 'room_name' in data or 'area_id' in data:
+            room_name = data.get('room_name', contract.room.to_dict()['name'])
+            area_id = data.get('area_id', contract.room.area_id)
+            room = Room.query.filter_by(name=room_name, area_id=area_id).first()
             if not room:
-                logger.info(f"Room {data['room_id']} not found")
-                return jsonify({'message': 'Không tìm thấy phòng'}), 404
+                logger.info(f"Room with name {room_name} and area_id {area_id} not found")
+                return jsonify({'message': 'Không tìm thấy phòng với tên và khu vực này'}), 404
             if room.room_id != original_room_id:
-                room_ids_to_update.add(room.room_id)  # Thêm phòng mới vào danh sách
+                room_ids_to_update.add(room.room_id)
                 contract.room_id = room.room_id
 
         if 'contract_type' in data:
@@ -338,7 +397,12 @@ def update_contract(contract_id):
 
         if 'start_date' in data:
             try:
-                contract.start_date = parse_date(data['start_date']).date()
+                new_start_date = parse_date(data['start_date']).date()
+                # Lấy ngày hiện tại theo múi giờ Việt Nam (UTC+7)
+                today = pendulum.now('Asia/Ho_Chi_Minh').date()
+                if new_start_date < today:
+                    return jsonify({'message': 'Ngày bắt đầu không được là ngày trong quá khứ'}), 400
+                contract.start_date = new_start_date
             except ValueError:
                 logger.error(f"Invalid start_date format: {data['start_date']}")
                 return jsonify({'message': 'Định dạng start_date không hợp lệ (YYYY-MM-DD)'}), 400
@@ -364,9 +428,17 @@ def update_contract(contract_id):
             logger.error(f"Failed to update status for contract {contract_id}: {str(update_error)}")
             return jsonify({'message': 'Lỗi khi cập nhật trạng thái hợp đồng', 'error': str(update_error)}), 500
 
+        # Cập nhật current_person_number nếu trạng thái hợp đồng thay đổi
+        for room_id in room_ids_to_update:
+            room = Room.query.with_for_update().get(room_id)
+            if contract.status == 'ACTIVE' and original_status != 'ACTIVE':
+                room.current_person_number += 1
+            elif contract.status != 'ACTIVE' and original_status == 'ACTIVE':
+                room.current_person_number = max(0, room.current_person_number - 1)
+            room.status = 'OCCUPIED' if room.current_person_number >= room.capacity else 'AVAILABLE'
+            logger.debug(f"Updated current_person_number for room {room_id}: {room.current_person_number}")
+
         try:
-            if not update_current_person_number(room_ids_to_update):
-                raise ValueError("Lỗi khi cập nhật số người trong phòng")
             db.session.commit()
             logger.info(f"Contract {contract_id} updated successfully")
         except ValueError as e:
@@ -385,10 +457,6 @@ def update_contract(contract_id):
         try:
             contract_data = contract.to_dict()
             logger.debug(f"Contract data before jsonify: {contract_data}")
-            if contract_data['room_details']:
-                logger.debug(f"Room details: {contract_data['room_details']}")
-            if contract_data['user_details']:
-                logger.debug(f"User details: {contract_data['user_details']}")
         except Exception as dict_error:
             logger.error(f"Failed to serialize contract {contract_id}: {str(dict_error)}")
             return jsonify({'message': 'Lỗi khi lấy dữ liệu hợp đồng', 'error': str(dict_error)}), 500
@@ -407,7 +475,6 @@ def update_contract(contract_id):
         logger.error(f"Unexpected error in update_contract for contract {contract_id}: {str(e)}")
         return jsonify({'message': 'Lỗi server khi cập nhật hợp đồng', 'error': str(e)}), 500
 
-# Xóa hợp đồng (Admin)
 @contract_bp.route('/admin/contracts/<int:contract_id>', methods=['DELETE'])
 @admin_required()
 def delete_contract(contract_id):
@@ -419,14 +486,17 @@ def delete_contract(contract_id):
         if contract.status == 'ACTIVE':
             return jsonify({'message': 'Không thể xóa hợp đồng đang ACTIVE'}), 400
 
-        room = Room.query.get(contract.room_id)
-        if room and contract.status == 'ACTIVE':
-            room.current_person_number -= 1
-            if room.current_person_number < room.capacity:
-                room.status = 'AVAILABLE'
+        room_id = contract.room_id
+        db.session.delete(contract)
+
+        # Cập nhật current_person_number sau khi xóa hợp đồng
+        room = Room.query.with_for_update().get(room_id)
+        if contract.status == 'ACTIVE':
+            room.current_person_number = max(0, room.current_person_number - 1)
+            room.status = 'OCCUPIED' if room.current_person_number >= room.capacity else 'AVAILABLE'
+            logger.debug(f"Updated current_person_number for room {room_id}: {room.current_person_number}")
 
         try:
-            db.session.delete(contract)
             db.session.commit()
             logger.info(f"Contract {contract_id} deleted")
         except IntegrityError:
@@ -436,6 +506,7 @@ def delete_contract(contract_id):
 
         return '', 204
     except Exception as e:
+        db.session.rollback()
         logger.error(f"Error in delete_contract: {str(e)}")
         return jsonify({'message': 'Lỗi server khi xóa hợp đồng'}), 500
 
@@ -490,3 +561,13 @@ def get_user_contracts():
     except Exception as e:
         logger.error(f"Unexpected error in get_user_contracts for user: {str(e)}")
         return jsonify({'message': 'Lỗi server khi lấy danh sách hợp đồng của người dùng', 'error': str(e)}), 500
+
+@contract_bp.route('/admin/update-contract-status', methods=['POST'])
+@admin_required()
+def manual_update_contract_status():
+    try:
+        update_contract_status()
+        return jsonify({'message': 'Cập nhật trạng thái hợp đồng thành công'}), 200
+    except Exception as e:
+        logger.error(f"Error in manual_update_contract_status: {str(e)}")
+        return jsonify({'message': 'Lỗi khi cập nhật trạng thái hợp đồng', 'error': str(e)}), 500

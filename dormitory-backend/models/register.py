@@ -14,6 +14,9 @@ class Register(db.Model):
 
     meeting_datetime = db.Column(db.TIMESTAMP, nullable=True)  # Lưu thời gian gặp mặt, có thể để trống
     meeting_location = db.Column(db.String(255), default="Văn phòng ký túc xá")  # Địa điểm mặc định
+
+    is_deleted = db.Column(db.Boolean, default=False, nullable=False)
+    deleted_at = db.Column(db.DateTime)
     # relationship với bảng Room
     room = db.relationship('Room', backref='registers', lazy=True)
 

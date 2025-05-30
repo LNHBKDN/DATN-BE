@@ -2,7 +2,6 @@ from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required, get_jwt
 from extensions import db
 from models.notification import Notification
-from models.notification_type import NotificationType
 from models.notification_recipient import NotificationRecipient
 from models.notification_media import NotificationMedia
 from models.room import Room
@@ -13,49 +12,56 @@ import os
 from werkzeug.utils import secure_filename
 import logging
 import re
-from unidecode import unidecode
 from datetime import datetime
-import bleach 
+import bleach
+import imghdr  # Thư viện để kiểm tra định dạng hình ảnh
+from PIL import Image  # Thư viện Pillow để xử lý hình ảnh
+from utils.fcm import send_fcm_notification
 
 # Thiết lập logging
 logger = logging.getLogger(__name__)
 
 notification_bp = Blueprint('notification', __name__)
-UPLOAD_FOLDER = 'uploads/notification_media'
-ALLOWED_EXTENSIONS = {'jpg', 'jpeg', 'png', 'mp4', 'avi'}
+UPLOAD_FOLDER = 'Uploads/notification_media'
+ALLOWED_EXTENSIONS = {'jpg', 'jpeg', 'png', 'mp4', 'avi', 'pdf', 'doc', 'docx'}
 IMAGE_EXTENSIONS = {'jpg', 'jpeg', 'png'}
 VIDEO_EXTENSIONS = {'mp4', 'avi'}
-MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB mỗi file
-MAX_FILES = 10  # Tối đa 10 file mỗi yêu cầu
+DOCUMENT_EXTENSIONS = {'pdf', 'doc', 'docx'}
+MAX_FILES = 15
+MAX_IMAGES = 10
+MAX_DOCUMENTS = 5
+MAX_IMAGE_SIZE = 50 * 1024 * 1024  # 50MB mỗi ảnh
+MAX_VIDEO_SIZE = 100 * 1024 * 1024  # 100MB mỗi video
+MAX_DOCUMENT_SIZE = 50 * 1024 * 1024  # 50MB mỗi tài liệu
 MAX_TOTAL_SIZE = 1000 * 1024 * 1024  # 1000MB tổng kích thước
 MAX_MESSAGE_LENGTH = 5000  # Tối đa 5000 ký tự cho message
+
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 def get_file_type(filename):
     ext = filename.rsplit('.', 1)[1].lower() if '.' in filename else ''
-    return 'video' if ext in VIDEO_EXTENSIONS else 'image'
+    if ext in VIDEO_EXTENSIONS:
+        return 'video'
+    elif ext in DOCUMENT_EXTENSIONS:
+        return 'document'
+    return 'image'
 
-def generate_filename(notification_type_name, created_at, extension, folder):
-    # Chuẩn hóa notification_type_name (loại bỏ ký tự đặc biệt, không dấu)
-    base_name = re.sub(r'[^\w]', '', unidecode(notification_type_name)).lower()
-    
-    # Định dạng created_at thành YYYYMMDD
-    date_str = created_at.strftime('%Y%m%d')
-    
-    # Tạo tên file cơ bản
-    filename = f"{base_name}_{date_str}.{extension.lower()}"
-    
-    # Xử lý trùng tên bằng cách thêm hậu tố _1, _2, ...
+def generate_filename(created_at, notification_id, extension, folder):
+    date_str = created_at.strftime('%Y%m%d_%H%M%S')
+    filename = f"notification_{date_str}_{notification_id}.{extension.lower()}"
     counter = 1
     while os.path.exists(os.path.join(folder, filename)):
-        filename = f"{base_name}_{date_str}_{counter}.{extension.lower()}"
+        filename = f"notification_{date_str}_{notification_id}_{counter}.{extension.lower()}"
         counter += 1
-    
     return filename
 
-
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+# Function to send FCM notifications to multiple users
+def send_fcm_notification_to_multiple(user_ids, title, message, data=None):
+    for user_id in user_ids:
+        send_fcm_notification(user_id, title, message, data)
 
 # GetPublicGeneralNotifications (Public)
 @notification_bp.route('/public/notifications/general', methods=['GET'])
@@ -63,9 +69,25 @@ def get_public_general_notifications():
     page = request.args.get('page', 1, type=int)
     limit = request.args.get('limit', 10, type=int)
 
-    notifications = Notification.query.filter_by(target_type='ALL').paginate(page=page, per_page=limit)
+    # Lọc thông báo có target_type='ALL' và không phải SYSTEM
+    notifications = Notification.query.filter_by(target_type='ALL', is_deleted=False).filter(Notification.target_type != 'SYSTEM').paginate(page=page, per_page=limit)
+
+    # Thêm danh sách media vào phản hồi
+    notifications_list = []
+    for notification in notifications.items:
+        media_query = NotificationMedia.query.filter_by(
+            notification_id=notification.id,
+            is_deleted=False
+        )
+        media_items = media_query.all()
+        media_list = [m.to_dict() for m in media_items]
+        notification_dict = notification.to_dict()
+        notification_dict['media'] = media_list  # Thêm danh sách media
+        notifications_list.append(notification_dict)
+
+    logger.info(f"Public general notifications fetched: {len(notifications_list)} items")
     return jsonify({
-        'notifications': [notification.to_dict() for notification in notifications.items],
+        'notifications': notifications_list,
         'total': notifications.total,
         'pages': notifications.pages,
         'current_page': notifications.page
@@ -78,9 +100,25 @@ def get_general_notifications():
     page = request.args.get('page', 1, type=int)
     limit = request.args.get('limit', 10, type=int)
 
-    notifications = Notification.query.filter_by(target_type='ALL').paginate(page=page, per_page=limit)
+    # Lọc thông báo có target_type='ALL' và không phải SYSTEM
+    notifications = Notification.query.filter_by(target_type='ALL', is_deleted=False).filter(Notification.target_type != 'SYSTEM').paginate(page=page, per_page=limit)
+
+    # Thêm danh sách media vào phản hồi
+    notifications_list = []
+    for notification in notifications.items:
+        media_query = NotificationMedia.query.filter_by(
+            notification_id=notification.id,
+            is_deleted=False
+        )
+        media_items = media_query.all()
+        media_list = [m.to_dict() for m in media_items]
+        notification_dict = notification.to_dict()
+        notification_dict['media'] = media_list  # Thêm danh sách media
+        notifications_list.append(notification_dict)
+
+    logger.info(f"General notifications fetched: {len(notifications_list)} items")
     return jsonify({
-        'notifications': [notification.to_dict() for notification in notifications.items],
+        'notifications': notifications_list,
         'total': notifications.total,
         'pages': notifications.pages,
         'current_page': notifications.page
@@ -90,20 +128,42 @@ def get_general_notifications():
 @notification_bp.route('/notifications', methods=['GET'])
 @admin_required()
 def get_all_notifications():
+    logger.info("Received GET request for /notifications")
     page = request.args.get('page', 1, type=int)
     limit = request.args.get('limit', 10, type=int)
     target_type = request.args.get('target_type')
-    type_id = request.args.get('type_id', type=int)
 
-    query = Notification.query
+    if limit < 1 or limit > 100:
+        logger.warning("Invalid limit value: %s", limit)
+        return jsonify({'message': 'Limit must be between 1 and 100'}), 422
+
+    # Lọc thông báo không phải SYSTEM
+    query = Notification.query.filter_by(is_deleted=False).filter(Notification.target_type != 'SYSTEM')
     if target_type:
-        query = query.filter_by(target_type=target_type.upper())
-    if type_id:
-        query = query.filter_by(type_id=type_id)
+        target_type = target_type.upper()
+        if target_type not in ['ALL', 'ROOM', 'USER']:
+            logger.warning("Invalid target_type: %s", target_type)
+            return jsonify({'message': 'target_type must be ALL, ROOM, or USER'}), 422
+        query = query.filter_by(target_type=target_type)
 
-    notifications = query.paginate(page=page, per_page=limit)
+    notifications = query.paginate(page=page, per_page=limit, error_out=False)
+    # Thêm danh sách media vào phản hồi
+    notifications_list = []
+    for notification in notifications.items:
+        media_query = NotificationMedia.query.filter_by(
+            notification_id=notification.id,
+            is_deleted=False
+        )
+        media_items = media_query.all()
+        media_list = [m.to_dict() for m in media_items]
+        notification_dict = notification.to_dict()
+        notification_dict['media'] = media_list  # Thêm danh sách media
+        notifications_list.append(notification_dict)
+        logger.info(f"Notification ID {notification.id} has {len(media_list)} media items: {media_list}")
+
+    logger.info(f"All notifications fetched: {len(notifications_list)} items")
     return jsonify({
-        'notifications': [notification.to_dict() for notification in notifications.items],
+        'notifications': notifications_list,
         'total': notifications.total,
         'pages': notifications.pages,
         'current_page': notifications.page
@@ -116,6 +176,8 @@ def get_notification_recipients(notification_id):
     notification = Notification.query.get(notification_id)
     if not notification:
         return jsonify({'message': 'Không tìm thấy thông báo'}), 404
+    if notification.is_deleted:
+        return jsonify({'message': 'Thông báo đã bị xóa'}), 400
 
     page = request.args.get('page', 1, type=int)
     limit = request.args.get('limit', 10, type=int)
@@ -145,48 +207,55 @@ def create_notification():
         data = request.form
         title = data.get('title')
         message = data.get('message')
-        type_id = data.get('type_id')
         target_type = data.get('target_type')
-        target_id = data.get('target_id')
+        email = data.get('email')
+        room_name = data.get('room_name')
+        area_id = data.get('area_id')
         related_entity_type = data.get('related_entity_type')
         related_entity_id = data.get('related_entity_id')
 
-        if not all([title, message, type_id, target_type]):
-            logger.warning("Thiếu các trường bắt buộc: title, message, type_id, target_type")
-            return jsonify({'message': 'Yêu cầu title, message, type_id và target_type'}), 400
+        if not all([title, message, target_type]):
+            logger.warning("Thiếu các trường bắt buộc: title, message, target_type")
+            return jsonify({'message': 'Yêu cầu title, message và target_type'}), 400
 
-        # Kiểm tra độ dài message
         if len(message) > MAX_MESSAGE_LENGTH:
             logger.warning(f"Message vượt quá độ dài tối đa: {len(message)} ký tự")
             return jsonify({'message': f'Message không được vượt quá {MAX_MESSAGE_LENGTH} ký tự'}), 400
 
-        # Vệ sinh message nếu chứa HTML
-        allowed_tags = ['p', 'br', 'strong', 'em', 'ul', 'ol', 'li']  # Các thẻ HTML cho phép
+        allowed_tags = ['p', 'br', 'strong', 'em', 'ul', 'ol', 'li']
         message = bleach.clean(message, tags=allowed_tags, strip=True)
 
         target_type = target_type.upper()
-        if target_type not in ['ALL', 'ROOM', 'USER']:
+        if target_type not in ['ALL', 'ROOM', 'USER', 'SYSTEM']:
             logger.warning("target_type không hợp lệ: %s", target_type)
-            return jsonify({'message': 'target_type phải là ALL, ROOM hoặc USER'}), 400
-
-        try:
-            type_id = int(type_id)
-        except (ValueError, TypeError):
-            logger.warning("type_id không phải số nguyên: %s", type_id)
-            return jsonify({'message': 'type_id phải là số nguyên hợp lệ'}), 400
-
-        notification_type = NotificationType.query.get(type_id)
-        if not notification_type:
-            logger.warning("Không tìm thấy loại thông báo: type_id=%s", type_id)
-            return jsonify({'message': 'Không tìm thấy loại thông báo'}), 404
+            return jsonify({'message': 'target_type phải là ALL, ROOM, USER hoặc SYSTEM'}), 400
 
         target_id_value = None
-        if target_id and target_id != 'null':
+        if target_type == 'ROOM':
+            if not room_name or not area_id:
+                logger.warning("Yêu cầu room_name và area_id cho ROOM")
+                return jsonify({'message': 'Yêu cầu room_name và area_id cho ROOM'}), 400
             try:
-                target_id_value = int(target_id)
+                area_id = int(area_id)
             except (ValueError, TypeError):
-                logger.warning("target_id không hợp lệ: %s", target_id)
-                return jsonify({'message': 'target_id phải là số nguyên hợp lệ hoặc null'}), 400
+                logger.warning("area_id không hợp lệ: %s", area_id)
+                return jsonify({'message': 'area_id phải là số nguyên hợp lệ'}), 400
+            room = Room.query.filter_by(name=room_name, area_id=area_id).first()
+            if not room:
+                logger.warning("Không tìm thấy phòng: room_name=%s, area_id=%s", room_name, area_id)
+                return jsonify({'message': 'Không tìm thấy phòng với tên và khu vực này'}), 404
+            target_id_value = room.room_id
+        elif target_type in ['USER', 'SYSTEM']:
+            if not email:
+                logger.warning("Yêu cầu email cho USER hoặc SYSTEM")
+                return jsonify({'message': 'Yêu cầu email cho USER hoặc SYSTEM'}), 400
+            user = User.query.filter_by(email=email).first()
+            if not user:
+                logger.warning("Không tìm thấy người dùng: email=%s", email)
+                return jsonify({'message': 'Không tìm thấy người dùng với email này'}), 404
+            target_id_value = user.user_id
+        elif target_type == 'ALL':
+            target_id_value = None
 
         related_entity_id_value = None
         if related_entity_id and related_entity_id != 'null':
@@ -196,28 +265,13 @@ def create_notification():
                 logger.warning("related_entity_id không hợp lệ: %s", related_entity_id)
                 return jsonify({'message': 'related_entity_id phải là số nguyên hợp lệ hoặc null'}), 400
 
-        if target_type == 'ROOM' and target_id_value:
-            if not Room.query.get(target_id_value):
-                logger.warning("Không tìm thấy phòng: target_id=%s", target_id_value)
-                return jsonify({'message': 'Không tìm thấy phòng'}), 404
-        elif target_type == 'USER' and target_id_value:
-            if not User.query.get(target_id_value):
-                logger.warning("Không tìm thấy người dùng: target_id=%s", target_id_value)
-                return jsonify({'message': 'Không tìm thấy người dùng'}), 404
-        elif target_type != 'ALL' and not target_id_value:
-            logger.warning("Yêu cầu target_id cho ROOM hoặc USER: target_type=%s", target_type)
-            return jsonify({'message': 'Yêu cầu target_id cho ROOM hoặc USER'}), 400
-
-        # Lấy thông tin admin từ JWT
         claims = get_jwt()
         admin_id = int(claims.get('sub'))
         admin_fullname = claims.get('fullname', 'Admin')
 
-        # Tạo thông báo
         notification = Notification(
             title=title,
             message=message,
-            type_id=type_id,
             target_type=target_type,
             target_id=target_id_value,
             related_entity_type=related_entity_type,
@@ -227,7 +281,8 @@ def create_notification():
         db.session.add(notification)
         db.session.flush()
 
-        # Xử lý media
+        notification_id = notification.id
+
         files = request.files.getlist('media')
         if len(files) > MAX_FILES:
             logger.warning("Số lượng file vượt quá giới hạn: count=%s, max=%s", len(files), MAX_FILES)
@@ -243,78 +298,112 @@ def create_notification():
             return jsonify({'message': f'Tổng kích thước file vượt quá {MAX_TOTAL_SIZE // (1024 * 1024)}MB'}), 400
 
         uploaded_media = []
+        failed_uploads = []
         base_url = request.host_url.rstrip('/')
-        admin_name = re.sub(r'[^\w\-]', '_', admin_fullname)
-        folder_name = f"{notification.id}_{target_type}_{admin_name}"
-        media_folder = os.path.join(UPLOAD_FOLDER, folder_name)
-        try:
-            os.makedirs(media_folder, exist_ok=True)
-            logger.debug("Tạo thư mục media: %s", media_folder)
-        except OSError as e:
-            logger.error("Lỗi khi tạo thư mục: folder=%s, error=%s", media_folder, str(e))
-            return jsonify({'message': 'Lỗi khi tạo thư mục lưu trữ'}), 500
-
         image_count = 0
         video_count = 0
+        document_count = 0
+
         for index, file in enumerate(files):
             if file.filename == '':
                 logger.warning("File không có tên: index=%s", index)
+                failed_uploads.append({'index': index, 'error': 'File không có tên'})
                 continue
 
             if not allowed_file(file.filename):
                 logger.warning("Định dạng file không hỗ trợ: filename=%s", file.filename)
-                return jsonify({'message': f'File {file.filename} có định dạng không hỗ trợ. Chỉ chấp nhận: {", ".join(ALLOWED_EXTENSIONS)}'}), 400
+                failed_uploads.append({'index': index, 'error': f'File {file.filename} có định dạng không hỗ trợ. Chỉ chấp nhận: {", ".join(ALLOWED_EXTENSIONS)}'})
+                continue
 
             file.seek(0, os.SEEK_END)
             file_size = file.tell()
             file.seek(0)
-            if file_size > MAX_FILE_SIZE:
-                file_type = get_file_type(file.filename)
-                logger.warning("File %s quá lớn: filename=%s, size=%s, max=%s", file_type, file.filename, file_size, MAX_FILE_SIZE)
-                return jsonify({'message': f'File {file.filename} ({file_type}) quá lớn. Tối đa {MAX_FILE_SIZE // (1024 * 1024)}MB'}), 400
+            file_type = get_file_type(file.filename)
+
+            if file_type == 'image':
+                if file_size > MAX_IMAGE_SIZE:
+                    logger.warning("Ảnh quá lớn: filename=%s, size=%s, max=%s", file.filename, file_size, MAX_IMAGE_SIZE)
+                    failed_uploads.append({'index': index, 'error': f'Ảnh {file.filename} quá lớn. Tối đa {MAX_IMAGE_SIZE // (1024 * 1024)}MB'})
+                    continue
+                # Kiểm tra định dạng hình ảnh
+                try:
+                    image = Image.open(file)
+                    image.verify()  # Kiểm tra tính toàn vẹn của hình ảnh
+                    file.seek(0)  # Đặt lại con trỏ file sau khi kiểm tra
+                except Exception as e:
+                    logger.error(f"File hình ảnh không hợp lệ: filename={file.filename}, error={str(e)}")
+                    failed_uploads.append({'index': index, 'error': f'File hình ảnh {file.filename} không hợp lệ: {str(e)}'})
+                    continue
+                image_count += 1
+                if image_count > MAX_IMAGES:
+                    logger.warning("Số lượng ảnh vượt quá giới hạn: count=%s, max=%s", image_count, MAX_IMAGES)
+                    failed_uploads.append({'index': index, 'error': f'Tối đa {MAX_IMAGES} ảnh được phép upload'})
+                    continue
+            elif file_type == 'video':
+                if file_size > MAX_VIDEO_SIZE:
+                    logger.warning("Video quá lớn: filename=%s, size=%s, max=%s", file.filename, file_size, MAX_VIDEO_SIZE)
+                    failed_uploads.append({'index': index, 'error': f'Video {file.filename} quá lớn. Tối đa {MAX_VIDEO_SIZE // (1024 * 1024)}MB'})
+                    continue
+                video_count += 1
+            else:  # document
+                if file_size > MAX_DOCUMENT_SIZE:
+                    logger.warning("Tài liệu quá lớn: filename=%s, size=%s, max=%s", file.filename, file_size, MAX_DOCUMENT_SIZE)
+                    failed_uploads.append({'index': index, 'error': f'Tài liệu {file.filename} quá lớn. Tối đa {MAX_DOCUMENT_SIZE // (1024 * 1024)}MB'})
+                    continue
+                document_count += 1
+                if document_count > MAX_DOCUMENTS:
+                    logger.warning("Số lượng tài liệu vượt quá giới hạn: count=%s, max=%s", document_count, MAX_DOCUMENTS)
+                    failed_uploads.append({'index': index, 'error': f'Tối đa {MAX_DOCUMENTS} tài liệu được phép upload'})
+                    continue
 
             extension = file.filename.rsplit('.', 1)[1].lower() if '.' in file.filename else ''
-            filename = generate_filename(notification_type.name, notification.created_at, extension, media_folder)
-            file_path = os.path.join(media_folder, filename)
+            filename = generate_filename(notification.created_at, notification_id, extension, UPLOAD_FOLDER)
+            file_path = os.path.join(UPLOAD_FOLDER, filename)
 
             try:
                 file.save(file_path)
                 logger.debug("Lưu file media tại: %s", file_path)
             except OSError as e:
                 logger.error("Lỗi khi lưu file media: filename=%s, error=%s", filename, str(e))
-                return jsonify({'message': f'Lỗi khi lưu file {filename}'}), 500
+                failed_uploads.append({'index': index, 'error': f'Lỗi khi lưu file {filename}'})
+                continue
 
-            media_url = f"{base_url}/notification_media/{folder_name}/{filename}"
-            file_type = get_file_type(filename)
-            if file_type == 'image':
-                image_count += 1
-            else:
-                video_count += 1
+            media_url = filename
+            sort_order = data.get(f'sort_order_{index}', str(index))
+            try:
+                sort_order = int(sort_order)
+            except (ValueError, TypeError):
+                sort_order = index
 
             media = NotificationMedia(
                 notification_id=notification.id,
                 media_url=media_url,
                 alt_text=data.get(f'alt_text_{index}', ''),
                 is_primary=(index == 0),
-                sort_order=index,
+                sort_order=sort_order,
                 file_type=file_type,
                 file_size=file_size,
                 uploaded_at=datetime.utcnow()
             )
             db.session.add(media)
-            uploaded_media.append(media)
+            uploaded_media.append({
+                'filename': filename,
+                'type': file_type,
+                'size': file_size,
+                'sort_order': sort_order,
+                'media_url': f"{base_url}/api/notification_media/{filename}"
+            })
 
-        # Tạo danh sách người nhận
         recipients = []
         if target_type == 'ROOM':
             contracts = Contract.query.filter_by(room_id=target_id_value, status='ACTIVE').all()
             recipients = [contract.user_id for contract in contracts]
-        elif target_type == 'USER':
+        elif target_type in ['USER', 'SYSTEM']:
             recipients = [target_id_value]
         elif target_type == 'ALL':
             recipients = [user.user_id for user in User.query.all()]
 
-        media_message = f" (kèm {image_count} ảnh, {video_count} video)" if (image_count + video_count) > 0 else ""
+        media_message = f" (kèm {image_count} ảnh, {video_count} video, {document_count} tài liệu)" if (image_count + video_count + document_count) > 0 else ""
 
         for user_id in recipients:
             recipient = NotificationRecipient(notification_id=notification.id, user_id=user_id)
@@ -326,16 +415,41 @@ def create_notification():
         try:
             db.session.commit()
             logger.info("Tạo thông báo và lưu %s file media thành công: notification_id=%s", len(uploaded_media), notification.id)
-            return jsonify(notification.to_dict()), 201
+            if target_type in ['USER', 'SYSTEM']:
+                send_fcm_notification(
+                    user_id=target_id_value,
+                    title=notification.title,
+                    message=notification.message,
+                    data={
+                        'notification_id': str(notification.id),
+                        'related_entity_type': related_entity_type or '',
+                        'related_entity_id': str(related_entity_id_value) if related_entity_id_value else ''
+                    }
+                )
+            else:  # ROOM hoặc ALL
+                send_fcm_notification_to_multiple(
+                    user_ids=recipients,
+                    title=notification.title,
+                    message=notification.message,
+                    data={
+                        'notification_id': str(notification.id),
+                        'related_entity_type': related_entity_type or '',
+                        'related_entity_id': str(related_entity_id_value) if related_entity_id_value else ''
+                    }
+                )
+            response = notification.to_dict()
+            response['uploaded_media'] = uploaded_media
+            response['failed_uploads'] = failed_uploads
+            return jsonify(response), 201
         except Exception as e:
             db.session.rollback()
-            logger.error("Lỗi khi lưu thông báo/media: %s", str(e))
+            logger.error("Lỗi khi lưu thông báo: %s", str(e))
             for media in uploaded_media:
-                file_path = os.path.join(media_folder, os.path.basename(media.media_url))
+                file_path = os.path.join(UPLOAD_FOLDER, media['filename'])
                 if os.path.exists(file_path):
                     os.remove(file_path)
                     logger.info("Xóa file media do rollback: %s", file_path)
-            return jsonify({'message': 'Lỗi khi lưu thông báo, vui lòng thử lại'}), 500
+            return jsonify({'message': 'Lỗi khi lưu thông báo, vui lòng thử lại', 'failed_uploads': failed_uploads}), 500
 
     except Exception as e:
         logger.error("Lỗi server khi xử lý yêu cầu: %s", str(e))
@@ -344,9 +458,8 @@ def create_notification():
 # UpdateNotification (Admin)
 @notification_bp.route('/admin/notifications/<int:notification_id>', methods=['PUT'])
 @admin_required()
-def update_notification(notification_id):
+def update_notification():
     try:
-        # Tìm thông báo
         notification = Notification.query.get(notification_id)
         if not notification:
             logger.warning("Không tìm thấy thông báo: notification_id=%s", notification_id)
@@ -356,37 +469,55 @@ def update_notification(notification_id):
             logger.warning("Thông báo đã bị xóa: notification_id=%s", notification_id)
             return jsonify({'message': 'Thông báo đã bị xóa'}), 400
 
-        # Kiểm tra request là multipart/form-data
         if not request.content_type.startswith('multipart/form-data'):
             logger.warning("Yêu cầu không phải multipart/form-data")
             return jsonify({'message': 'Yêu cầu multipart/form-data'}), 400
 
         data = request.form
         message = data.get('message')
+        email = data.get('email')
+        room_name = data.get('room_name')
+        area_id = data.get('area_id')
 
-        # Kiểm tra message
         if not message:
             logger.warning("Thiếu trường message")
             return jsonify({'message': 'Yêu cầu trường message'}), 400
 
-        # Kiểm tra độ dài message
         if len(message) > MAX_MESSAGE_LENGTH:
             logger.warning(f"Message vượt quá độ dài tối đa: {len(message)} ký tự")
             return jsonify({'message': f'Message không được vượt quá {MAX_MESSAGE_LENGTH} ký tự'}), 400
 
-        # Vệ sinh message nếu chứa HTML
         allowed_tags = ['p', 'br', 'strong', 'em', 'ul', 'ol', 'li']
         message = bleach.clean(message, tags=allowed_tags, strip=True)
 
-        # Cập nhật message
         notification.message = message
 
-        # Lấy thông tin admin từ JWT
+        target_id_value = notification.target_id
+        if notification.target_type == 'ROOM':
+            if room_name and area_id:
+                try:
+                    area_id = int(area_id)
+                except (ValueError, TypeError):
+                    logger.warning("area_id không hợp lệ: %s", area_id)
+                    return jsonify({'message': 'area_id phải là số nguyên hợp lệ'}), 400
+                room = Room.query.filter_by(name=room_name, area_id=area_id).first()
+                if not room:
+                    logger.warning("Không tìm thấy phòng: room_name=%s, area_id=%s", room_name, area_id)
+                    return jsonify({'message': 'Không tìm thấy phòng với tên và khu vực này'}), 404
+                target_id_value = room.room_id
+        elif notification.target_type in ['USER', 'SYSTEM']:
+            if email:
+                user = User.query.filter_by(email=email).first()
+                if not user:
+                    logger.warning("Không tìm thấy người dùng: email=%s", email)
+                    return jsonify({'message': 'Không tìm thấy người dùng với email này'}), 404
+                target_id_value = user.user_id
+        notification.target_id = target_id_value
+
         claims = get_jwt()
         admin_id = int(claims.get('sub'))
         admin_fullname = claims.get('fullname', 'Admin')
 
-        # Xử lý xóa media
         media_ids_to_delete = data.get('media_ids_to_delete', '').split(',')
         media_ids_to_delete = [int(id) for id in media_ids_to_delete if id.strip().isdigit()]
         if media_ids_to_delete:
@@ -398,9 +529,9 @@ def update_notification(notification_id):
             for media in media_to_delete:
                 media.is_deleted = True
                 media.deleted_at = datetime.utcnow()
+                media.notification_id = None  # Đặt notification_id thành NULL
                 logger.debug("Soft delete media: media_id=%s", media.media_id)
 
-        # Xử lý thêm media mới
         files = request.files.getlist('media')
         current_media_count = NotificationMedia.query.filter_by(
             notification_id=notification_id,
@@ -420,81 +551,128 @@ def update_notification(notification_id):
             return jsonify({'message': f'Tổng kích thước file vượt quá {MAX_TOTAL_SIZE // (1024 * 1024)}MB'}), 400
 
         uploaded_media = []
+        failed_uploads = []
         base_url = request.host_url.rstrip('/')
-        admin_name = re.sub(r'[^\w\-]', '_', admin_fullname)
-        folder_name = f"{notification.id}_{notification.target_type}_{admin_name}"
-        media_folder = os.path.join(UPLOAD_FOLDER, folder_name)
-        try:
-            os.makedirs(media_folder, exist_ok=True)
-            logger.debug("Tạo thư mục media: %s", media_folder)
-        except OSError as e:
-            logger.error("Lỗi khi tạo thư mục: folder=%s, error=%s", media_folder, str(e))
-            return jsonify({'message': 'Lỗi khi tạo thư mục lưu trữ'}), 500
-
-        notification_type = NotificationType.query.get(notification.type_id)
-        image_count = 0
+        current_image_count = NotificationMedia.query.filter_by(
+            notification_id=notification_id,
+            file_type='image',
+            is_deleted=False
+        ).count()
+        current_document_count = NotificationMedia.query.filter_by(
+            notification_id=notification_id,
+            file_type='document',
+            is_deleted=False
+        ).count()
+        image_count = current_image_count
         video_count = 0
+        document_count = current_document_count
+
         for index, file in enumerate(files):
             if file.filename == '':
                 logger.warning("File không có tên: index=%s", index)
+                failed_uploads.append({'index': index, 'error': 'File không có tên'})
                 continue
 
             if not allowed_file(file.filename):
                 logger.warning("Định dạng file không hỗ trợ: filename=%s", file.filename)
-                return jsonify({'message': f'File {file.filename} có định dạng không hỗ trợ. Chỉ chấp nhận: {", ".join(ALLOWED_EXTENSIONS)}'}), 400
+                failed_uploads.append({'index': index, 'error': f'File {file.filename} có định dạng không hỗ trợ. Chỉ chấp nhận: {", ".join(ALLOWED_EXTENSIONS)}'})
+                continue
 
             file.seek(0, os.SEEK_END)
             file_size = file.tell()
             file.seek(0)
-            if file_size > MAX_FILE_SIZE:
-                file_type = get_file_type(file.filename)
-                logger.warning("File %s quá lớn: filename=%s, size=%s, max=%s", file_type, file.filename, file_size, MAX_FILE_SIZE)
-                return jsonify({'message': f'File {file.filename} ({file_type}) quá lớn. Tối đa {MAX_FILE_SIZE // (1024 * 1024)}MB'}), 400
+            file_type = get_file_type(file.filename)
+
+            if file_type == 'image':
+                if file_size > MAX_IMAGE_SIZE:
+                    logger.warning("Ảnh quá lớn: filename=%s, size=%s, max=%s", file.filename, file_size, MAX_IMAGE_SIZE)
+                    failed_uploads.append({'index': index, 'error': f'Ảnh {file.filename} quá lớn. Tối đa {MAX_IMAGE_SIZE // (1024 * 1024)}MB'})
+                    continue
+                # Kiểm tra định dạng hình ảnh
+                try:
+                    image = Image.open(file)
+                    image.verify()  # Kiểm tra tính toàn vẹn của hình ảnh
+                    file.seek(0)  # Đặt lại con trỏ file sau khi kiểm tra
+                except Exception as e:
+                    logger.error(f"File hình ảnh không hợp lệ: filename={file.filename}, error={str(e)}")
+                    failed_uploads.append({'index': index, 'error': f'File hình ảnh {file.filename} không hợp lệ: {str(e)}'})
+                    continue
+                image_count += 1
+                if image_count > MAX_IMAGES:
+                    logger.warning("Số lượng ảnh vượt quá giới hạn: count=%s, max=%s", image_count, MAX_IMAGES)
+                    failed_uploads.append({'index': index, 'error': f'Tối đa {MAX_IMAGES} ảnh được phép upload'})
+                    continue
+            elif file_type == 'video':
+                if file_size > MAX_VIDEO_SIZE:
+                    logger.warning("Video quá lớn: filename=%s, size=%s, max=%s", file.filename, file_size, MAX_VIDEO_SIZE)
+                    failed_uploads.append({'index': index, 'error': f'Video {file.filename} quá lớn. Tối đa {MAX_VIDEO_SIZE // (1024 * 1024)}MB'})
+                    continue
+                video_count += 1
+            else:  # document
+                if file_size > MAX_DOCUMENT_SIZE:
+                    logger.warning("Tài liệu quá lớn: filename=%s, size=%s, max=%s", file.filename, file_size, MAX_DOCUMENT_SIZE)
+                    failed_uploads.append({'index': index, 'error': f'Tài liệu {file.filename} quá lớn. Tối đa {MAX_DOCUMENT_SIZE // (1024 * 1024)}MB'})
+                    continue
+                document_count += 1
+                if document_count > MAX_DOCUMENTS:
+                    logger.warning("Số lượng tài liệu vượt quá giới hạn: count=%s, max=%s", document_count, MAX_DOCUMENTS)
+                    failed_uploads.append({'index': index, 'error': f'Tối đa {MAX_DOCUMENTS} tài liệu được phép upload'})
+                    continue
 
             extension = file.filename.rsplit('.', 1)[1].lower() if '.' in file.filename else ''
-            filename = generate_filename(notification_type.name, notification.created_at, extension, media_folder)
-            file_path = os.path.join(media_folder, filename)
+            filename = generate_filename(notification.created_at, notification_id, extension, UPLOAD_FOLDER)
+            file_path = os.path.join(UPLOAD_FOLDER, filename)
 
             try:
                 file.save(file_path)
                 logger.debug("Lưu file media tại: %s", file_path)
             except OSError as e:
                 logger.error("Lỗi khi lưu file media: filename=%s, error=%s", filename, str(e))
-                return jsonify({'message': f'Lỗi khi lưu file {filename}'}), 500
+                failed_uploads.append({'index': index, 'error': f'Lỗi khi lưu file {filename}'})
+                continue
 
-            media_url = f"{base_url}/notification_media/{folder_name}/{filename}"
-            file_type = get_file_type(filename)
-            if file_type == 'image':
-                image_count += 1
-            else:
-                video_count += 1
+            media_url = filename
+            sort_order = data.get(f'sort_order_{index}', str(index + current_media_count))
+            try:
+                sort_order = int(sort_order)
+            except (ValueError, TypeError):
+                sort_order = index + current_media_count
 
             media = NotificationMedia(
                 notification_id=notification.id,
                 media_url=media_url,
                 alt_text=data.get(f'alt_text_{index}', ''),
                 is_primary=(index == 0 and current_media_count == 0),
-                sort_order=index + current_media_count,
+                sort_order=sort_order,
                 file_type=file_type,
                 file_size=file_size,
                 uploaded_at=datetime.utcnow()
             )
             db.session.add(media)
-            uploaded_media.append(media)
+            uploaded_media.append({
+                'filename': filename,
+                'type': file_type,
+                'size': file_size,
+                'sort_order': sort_order,
+                'media_url': f"{base_url}/api/notification_media/{filename}"
+            })
 
         try:
             db.session.commit()
             logger.info("Cập nhật thông báo và xử lý %s file media thành công: notification_id=%s", len(uploaded_media), notification.id)
-            return jsonify(notification.to_dict()), 200
+            response = notification.to_dict()
+            response['uploaded_media'] = uploaded_media
+            response['failed_uploads'] = failed_uploads
+            return jsonify(response), 200
         except Exception as e:
             db.session.rollback()
-            logger.error("Lỗi khi cập nhật thông báo/media: %s", str(e))
+            logger.error("Lỗi khi cập nhật thông báo: %s", str(e))
             for media in uploaded_media:
-                file_path = os.path.join(media_folder, os.path.basename(media.media_url))
+                file_path = os.path.join(UPLOAD_FOLDER, media['filename'])
                 if os.path.exists(file_path):
                     os.remove(file_path)
                     logger.info("Xóa file media do rollback: %s", file_path)
-            return jsonify({'message': 'Lỗi khi cập nhật thông báo, vui lòng thử lại'}), 500
+            return jsonify({'message': 'Lỗi khi cập nhật thông báo, vui lòng thử lại', 'failed_uploads': failed_uploads}), 500
 
     except Exception as e:
         logger.error("Lỗi server khi cập nhật thông báo: %s", str(e))
@@ -515,17 +693,16 @@ def delete_notification(notification_id):
             logger.warning("Thông báo đã bị xóa: notification_id=%s", notification_id)
             return jsonify({'message': 'Thông báo đã bị xóa trước đó'}), 400
 
-        # Soft delete thông báo
         notification.is_deleted = True
         notification.deleted_at = datetime.utcnow()
         logger.debug("Đánh dấu soft delete thông báo: notification_id=%s", notification_id)
 
-        # Soft delete tất cả media liên quan
         media_items = NotificationMedia.query.filter_by(notification_id=notification_id, is_deleted=False).all()
         for media in media_items:
             media.is_deleted = True
             media.deleted_at = datetime.utcnow()
-            logger.debug("Đánh dấu soft delete media: media_id=%s", media.media_id)
+            media.notification_id = None
+            logger.debug("Đánh dấu soft delete và đặt notification_id thành NULL cho media: media_id=%s", media.media_id)
 
         try:
             db.session.commit()
@@ -535,7 +712,6 @@ def delete_notification(notification_id):
             db.session.rollback()
             logger.error("Lỗi khi xóa thông báo/media: %s", str(e))
             return jsonify({'message': 'Lỗi khi xóa thông báo, vui lòng thử lại'}), 500
-
     except Exception as e:
         logger.error("Lỗi server khi xóa thông báo: %s", str(e))
         return jsonify({'message': 'Lỗi server nội bộ, vui lòng thử lại sau'}), 500
@@ -550,7 +726,8 @@ def search_notifications():
     start_date = request.args.get('start_date')
     end_date = request.args.get('end_date')
 
-    query = Notification.query
+    # Lọc thông báo không phải SYSTEM
+    query = Notification.query.filter_by(is_deleted=False).filter(Notification.target_type != 'SYSTEM')
 
     if keyword:
         query = query.filter(
@@ -563,8 +740,23 @@ def search_notifications():
         query = query.filter(Notification.created_at <= end_date)
 
     notifications = query.paginate(page=page, per_page=limit)
+    # Thêm danh sách media vào phản hồi
+    notifications_list = []
+    for notification in notifications.items:
+        media_query = NotificationMedia.query.filter_by(
+            notification_id=notification.id,
+            is_deleted=False
+        )
+        media_items = media_query.all()
+        media_list = [m.to_dict() for m in media_items]
+        notification_dict = notification.to_dict()
+        notification_dict['media'] = media_list  # Thêm danh sách media
+        notifications_list.append(notification_dict)
+        logger.info(f"Notification ID {notification.id} has {len(media_list)} media items: {media_list}")
+
+    logger.info(f"Search notifications fetched: {len(notifications_list)} items")
     return jsonify({
-        'notifications': [notification.to_dict() for notification in notifications.items],
+        'notifications': notifications_list,
         'total': notifications.total,
         'pages': notifications.pages,
         'current_page': notifications.page

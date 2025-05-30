@@ -1,5 +1,6 @@
 from extensions import db
 from datetime import date 
+import pendulum
 
 class Contract(db.Model):
     __tablename__ = 'contracts'
@@ -17,6 +18,7 @@ class Contract(db.Model):
     contract_type = db.Column(db.Enum('SHORT_TERM', 'LONG_TERM'), nullable=False)
     start_date = db.Column(db.Date, nullable=False)
     end_date = db.Column(db.Date, nullable=False)
+    is_deleted = db.Column(db.Boolean, default=False)
     # relationships
     room = db.relationship('Room', backref='contracts', lazy=True)
     user = db.relationship('User', backref='contracts', lazy=True)
@@ -38,7 +40,7 @@ class Contract(db.Model):
     @property
     def calculated_status(self):
         """Tính toán trạng thái hợp đồng dựa trên ngày hiện tại."""
-        today = date.today()
+        today = pendulum.now('Asia/Ho_Chi_Minh').date()
         if self.status == 'TERMINATED':
             return 'TERMINATED'
         if today < self.start_date:

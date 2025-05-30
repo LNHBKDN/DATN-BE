@@ -20,7 +20,7 @@ class PaymentTransaction(db.Model):
         # Validation
         if float(self.amount) <= 0:
             raise ValueError("Amount phải lớn hơn 0")
-        if self.payment_method not in ['VIETQR', 'BANK_TRANSFER']:
+        if self.payment_method not in ['VNPAY']:
             raise ValueError(f"Phương thức thanh toán không hợp lệ: {self.payment_method}")
 
     def to_dict(self):

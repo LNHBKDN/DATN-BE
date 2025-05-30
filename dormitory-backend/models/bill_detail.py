@@ -1,5 +1,5 @@
 from extensions import db
-
+from models.room import Room
 class BillDetail(db.Model):
     __tablename__ = 'bill_details'
     detail_id = db.Column(db.BigInteger, primary_key=True, autoincrement=True)
@@ -17,6 +17,10 @@ class BillDetail(db.Model):
     monthly_bill = db.relationship('MonthlyBill', back_populates='bill_detail', uselist=False, lazy=True)
 
     def to_dict(self):
+        # Query the Room table to get the room's name based on room_id
+        room = Room.query.filter_by(room_id=self.room_id).first()
+        room_name = room.name if room else 'N/A'
+
         return {
             'detail_id': self.detail_id,
             'rate_id': self.rate_id,
@@ -24,6 +28,7 @@ class BillDetail(db.Model):
             'current_reading': str(self.current_reading),
             'price': str(self.price),
             'room_id': self.room_id,
+            'room_name': room_name,  # Include the room name
             'bill_month': self.bill_month.isoformat() if self.bill_month else None,
             'submitted_by': self.submitted_by,
             'submitted_at': self.submitted_at.isoformat() if self.submitted_at else None,
@@ -31,12 +36,13 @@ class BillDetail(db.Model):
                 'rate_id': self.rate.rate_id,
                 'unit_price': str(self.rate.unit_price),
                 'effective_date': self.rate.effective_date.isoformat() if self.rate.effective_date else None,
-                'service_id': self.rate.service_id
+                'service_id': self.rate.service_id,
+                'service_name': self.rate.service.name if self.rate and self.rate.service else None
             } if self.rate else None,
             'submitter_details': {
                 'user_id': self.submitter.user_id,
                 'fullname': self.submitter.fullname,
                 'email': self.submitter.email
             } if self.submitter else None,
-            'monthly_bill_id': self.monthly_bill.bill_id if self.monthly_bill else None  # Chỉ lấy bill_id, không gọi to_dict()
+            'monthly_bill_id': self.monthly_bill.bill_id if self.monthly_bill else None
         }

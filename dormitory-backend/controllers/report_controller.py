@@ -8,9 +8,11 @@ from models.room import Room
 from models.report_type import ReportType
 from models.reportimage import ReportImage
 from models.contract import Contract
+from models.notification import Notification
+from models.notification_recipient import NotificationRecipient
 from controllers.auth_controller import admin_required, user_required
 from datetime import datetime
-from sqlalchemy.exc import IntegrityError, DataError
+from sqlalchemy.exc import IntegrityError, DataError, SQLAlchemyError
 import os
 from werkzeug.utils import secure_filename
 import uuid
@@ -18,6 +20,7 @@ import re
 from unidecode import unidecode
 from werkzeug.exceptions import RequestEntityTooLarge
 
+from utils.fcm import send_fcm_notification
 # Thiết lập logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -41,21 +44,6 @@ def allowed_file(filename):
 def get_file_type(filename):
     ext = filename.rsplit('.', 1)[1].lower() if '.' in filename else ''
     return 'video' if ext in VIDEO_EXTENSIONS else 'image'
-
-def generate_filename(fullname, extension, folder):
-    base_name = re.sub(r'[^\w]', '', unidecode(fullname)).title()
-    name_parts = base_name.split()
-    if len(name_parts) > 1:
-        base_name = ''.join(name_parts[:-1]) + name_parts[-1][0]
-    else:
-        base_name = name_parts[0]
-    
-    filename = f"{base_name}.{extension.lower()}"
-    counter = 1
-    while os.path.exists(os.path.join(folder, filename)):
-        filename = f"{base_name}_{counter}.{extension.lower()}"
-        counter += 1
-    return filename
 
 # Lấy chi tiết báo cáo theo ID (Admin hoặc User sở hữu)
 @report_bp.route('/reports/<int:report_id>', methods=['GET'])
@@ -245,13 +233,12 @@ def create_report():
             return jsonify({'message': 'Yêu cầu multipart/form-data'}), 400
 
         data = request.form
-        room_id = data.get('room_id', type=int)
         report_type_id = data.get('report_type_id', type=int)
         content = data.get('content')
         title = data.get('title')
 
-        if not all([room_id, content, title]):
-            missing_fields = [field for field, value in [('room_id', room_id), ('content', content), ('title', title)] if not value]
+        if not all([content, title]):
+            missing_fields = [field for field, value in [('content', content), ('title', title)] if not value]
             logger.warning("Thiếu các trường bắt buộc: %s", missing_fields)
             return jsonify({'message': f'Yêu cầu các trường bắt buộc: {", ".join(missing_fields)}'}), 400
 
@@ -266,10 +253,21 @@ def create_report():
             logger.warning("Dữ liệu đầu vào không hợp lệ: %s", str(e))
             return jsonify({'message': f'Dữ liệu không hợp lệ: {str(e)}'}), 400
 
+        valid_contract = Contract.query.filter(
+            Contract.user_id == user_id,
+            Contract.status.in_(['ACTIVE', 'PENDING']),
+            Contract.is_deleted == False
+        ).first()
+
+        if not valid_contract:
+            logger.warning("Không tìm thấy hợp đồng hợp lệ cho user_id=%s", user_id)
+            return jsonify({'message': 'Bạn không có hợp đồng hợp lệ để tạo báo cáo'}), 403
+
+        room_id = valid_contract.room_id
         room = Room.query.get(room_id)
         if not room:
             logger.warning("Phòng không tồn tại: room_id=%s", room_id)
-            return jsonify({'message': 'Không tìm thấy phòng'}), 404
+            return jsonify({'message': 'Phòng liên kết với hợp đồng không tồn tại'}), 404
 
         if report_type_id is not None:
             report_type = ReportType.query.get(report_type_id)
@@ -282,15 +280,6 @@ def create_report():
             logger.warning("Người dùng không tồn tại: user_id=%s", user_id)
             return jsonify({'message': 'Không tìm thấy người dùng'}), 404
 
-        valid_contract = Contract.query.filter(
-            Contract.user_id == user_id,
-            Contract.room_id == room_id,
-            Contract.status.in_(['ACTIVE', 'PENDING'])
-        ).first()
-        if not valid_contract:
-            logger.warning("Không tìm thấy hợp đồng hợp lệ cho user_id=%s, room_id=%s", user_id, room_id)
-            return jsonify({'message': 'Bạn không có hợp đồng hợp lệ trong phòng này'}), 403
-
         report = Report(
             room_id=room_id,
             user_id=user_id,
@@ -300,7 +289,7 @@ def create_report():
             status='PENDING'
         )
         db.session.add(report)
-        db.session.flush()  # Lấy report_id trước khi commit
+        db.session.flush()
 
         files = request.files.getlist('images')
         if not files or all(file.filename == '' for file in files):
@@ -308,7 +297,6 @@ def create_report():
 
         uploaded_images = []
         saved_files = []
-        base_url = request.host_url.rstrip('/')
 
         if files:
             if len(files) > MAX_FILES_PER_REQUEST:
@@ -324,16 +312,9 @@ def create_report():
                 logger.warning("Tổng kích thước file quá lớn: total=%s, max=%s, report_id=%s", total_size, MAX_TOTAL_SIZE, report.report_id)
                 return jsonify({'message': f'Tổng kích thước file vượt quá {MAX_TOTAL_SIZE // (1024 * 1024)}MB'}), 400
 
-            room_name = re.sub(r'[^\w\-]', '_', room.name)
-            user_name = re.sub(r'[^\w\-]', '_', user.fullname if user.fullname else 'unknown')
-            folder_name = f"{report.report_id}_{room_name}_{user_name}"
-            report_folder = os.path.join(current_app.config['REPORT_IMAGES_FOLDER'], folder_name)
-            try:
-                os.makedirs(report_folder, exist_ok=True)
-                logger.debug("Tạo thư mục media: %s", report_folder)
-            except OSError as e:
-                logger.error("Lỗi khi tạo thư mục: folder=%s, error=%s", report_folder, str(e))
-                return jsonify({'message': 'Lỗi khi tạo thư mục lưu trữ'}), 500
+            report_folder = os.path.join(current_app.config['REPORT_IMAGES_FOLDER'])
+            os.makedirs(report_folder, exist_ok=True)
+            logger.debug("Tạo thư mục media: %s", report_folder)
 
             for index, file in enumerate(files):
                 if file.filename == '':
@@ -353,7 +334,7 @@ def create_report():
                     return jsonify({'message': f'File {file.filename} ({file_type}) quá lớn. Tối đa {MAX_FILE_SIZE // (1024 * 1024)}MB'}), 400
 
                 extension = file.filename.rsplit('.', 1)[1].lower() if '.' in file.filename else ''
-                filename = generate_filename(user.fullname, extension, report_folder)
+                filename = f"{uuid.uuid4().hex}.{extension}"
                 file_path = os.path.join(report_folder, filename)
 
                 try:
@@ -364,12 +345,12 @@ def create_report():
                     return jsonify({'message': f'Lỗi khi lưu file {filename}'}), 500
 
                 saved_files.append(file_path)
-                image_url = f"{base_url}/Uploads/report_images/{folder_name}/{filename}"
+                relative_path = filename
                 file_type = get_file_type(filename)
 
                 report_image = ReportImage(
                     report_id=report.report_id,
-                    image_url=image_url,
+                    image_url=relative_path,
                     file_type=file_type,
                     alt_text=data.get(f'alt_text_{index}', ''),
                     uploaded_at=datetime.utcnow()
@@ -377,37 +358,63 @@ def create_report():
                 db.session.add(report_image)
                 uploaded_images.append(report_image)
 
+        # Create notification within the same transaction
         try:
+            logger.debug(f"Creating notification for report_id={report.report_id}, user_id={user_id}")
+            if not user_id or not report.report_id:
+                logger.error(f"Invalid user_id={user_id} or report_id={report.report_id}")
+                raise ValueError("Invalid user_id or report_id")
+            
+            notification = Notification(
+                title="Báo cáo của bạn đã được gửi",
+                message="Báo cáo của bạn sẽ được quản trị viên tiếp nhận và xử lý.",
+                target_type="SYSTEM",
+                target_id=user_id,
+                related_entity_type="REPORT",
+                related_entity_id=report.report_id,
+                created_at=datetime.utcnow()
+            )
+            db.session.add(notification)
+            db.session.flush()
+            logger.debug(f"Notification added, id={notification.id}")
+
+            recipient = NotificationRecipient(
+                notification_id=notification.id,
+                user_id=user_id,
+                is_read=False
+            )
+            db.session.add(recipient)
+            logger.debug(f"NotificationRecipient added for notification_id={notification.id}")
+            
+            # Gửi FCM notification đến người dùng
+            send_fcm_notification(
+                user_id=user_id,
+                title=notification.title,
+                message=notification.message,
+                data={
+                    'notification_id': str(notification.id),
+                    'related_entity_type': 'REPORT',
+                    'related_entity_id': str(report.report_id)
+                }
+            )
             db.session.commit()
-            logger.info("Tạo báo cáo thành công: report_id=%s, media_count=%s", report.report_id, len(uploaded_images))
+            logger.info(f"Report created: report_id={report.report_id}, media_count={len(uploaded_images)}, notification_id={notification.id}")
             return jsonify(report.to_dict()), 201
-        except IntegrityError as e:
-            db.session.rollback()
-            for file_path in saved_files:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-                    logger.info(f"Cleaned up file: {file_path}")
-            logger.error("Lỗi toàn vẹn cơ sở dữ liệu khi tạo báo cáo: %s", str(e))
-            return jsonify({'message': 'Lỗi cơ sở dữ liệu: Dữ liệu không hợp lệ hoặc xung đột'}), 409
-        except DataError as e:
-            db.session.rollback()
-            for file_path in saved_files:
-                if os.path.exists(file_path):
-                    os.remove(file_path)
-            logger.error("Lỗi dữ liệu khi tạo báo cáo: %s", str(e))
-            return jsonify({'message': 'Dữ liệu đầu vào vượt quá giới hạn cho phép'}), 400
+
         except Exception as e:
             db.session.rollback()
             for file_path in saved_files:
                 if os.path.exists(file_path):
                     os.remove(file_path)
-            logger.error("Lỗi không xác định khi tạo báo cáo: %s", str(e))
-            return jsonify({'message': 'Lỗi khi tạo báo cáo, vui lòng thử lại'}), 500
+                    logger.info(f"Cleaned up file: {file_path}")
+            logger.error(f"Failed to create report or notification for user {user_id}, report {report.report_id}: {str(e)}")
+            return jsonify({'message': f'Lỗi khi tạo báo cáo hoặc thông báo: {str(e)}'}), 500
 
     except RequestEntityTooLarge:
         logger.warning("Yêu cầu vượt quá giới hạn kích thước")
         return jsonify({'message': f'Kích thước yêu cầu vượt quá giới hạn {current_app.config["MAX_CONTENT_LENGTH"] // (1024 * 1024)}MB'}), 413
     except Exception as e:
+        db.session.rollback()
         logger.error("Lỗi server khi xử lý yêu cầu tạo báo cáo: %s", str(e))
         return jsonify({'message': 'Lỗi server nội bộ, vui lòng thử lại sau'}), 500
 
@@ -447,19 +454,59 @@ def update_report(report_id):
                 'message': f'Trạng thái không hợp lệ, chỉ chấp nhận: {", ".join(VALID_STATUSES)}'
             }), 400
 
+        old_status = report.status
         report.room_id = new_room_id
         report.report_type_id = new_report_type_id
         report.description = new_description
         report.status = new_status
 
-        if new_status == 'RESOLVED' and report.status != 'RESOLVED':
+        notification_created = False
+        notification_id = None
+        if new_status == 'RESOLVED' and old_status != 'RESOLVED':
             report.resolved_at = datetime.utcnow()
-        elif new_status == 'CLOSED' and report.status != 'CLOSED':
+            try:
+                logger.debug(f"Creating notification for report_id={report.report_id}, user_id={report.user_id}")
+                if not report.user_id or not report.report_id:
+                    logger.error(f"Invalid user_id={report.user_id} or report_id={report.report_id}")
+                    raise ValueError("Invalid user_id or report_id")
+                
+                resolved_time = report.resolved_at
+                formatted_time = resolved_time.strftime("%H:%M %d/%m/%Y")
+                notification = Notification(
+                    title="Báo cáo của bạn đã được giải quyết",
+                    message=f"Báo cáo của bạn đã được giải quyết. Thời gian giải quyết: {formatted_time}",
+                    target_type="SYSTEM",
+                    target_id=report.user_id,
+                    related_entity_type="REPORT",
+                    related_entity_id=report.report_id,
+                    created_at=datetime.utcnow()
+                )
+                db.session.add(notification)
+                db.session.flush()
+                logger.debug(f"Notification added, id={notification.id}")
+
+                recipient = NotificationRecipient(
+                    notification_id=notification.id,
+                    user_id=report.user_id,
+                    is_read=False
+                )
+                db.session.add(recipient)
+                logger.debug(f"NotificationRecipient added for notification_id={notification.id}")
+                notification_created = True
+                notification_id = notification.id
+            except Exception as e:
+                db.session.rollback()
+                logger.error(f"Failed to create SYSTEM notification for user {report.user_id}, report {report.report_id}: {str(e)}")
+                return jsonify({'message': f'Lỗi khi tạo thông báo: {str(e)}'}), 500
+        elif new_status == 'CLOSED' and old_status != 'CLOSED':
             report.closed_at = datetime.utcnow()
 
         try:
             db.session.commit()
-            logger.info("Cập nhật báo cáo thành công: report_id=%s", report_id)
+            if notification_created:
+                logger.info(f"Report updated and notification created: report_id={report_id}, status={new_status}, notification_id={notification_id}")
+            else:
+                logger.info(f"Report updated: report_id={report_id}, status={new_status}")
             return jsonify(report.to_dict()), 200
         except Exception as e:
             db.session.rollback()
@@ -502,14 +549,64 @@ def update_report_status(report_id):
         old_status = report.status
         report.status = status
 
+        notification_created = False
+        notification_id = None
         if status == 'RESOLVED' and old_status != 'RESOLVED':
             report.resolved_at = datetime.utcnow()
+            try:
+                logger.debug(f"Creating notification for report_id={report.report_id}, user_id={report.user_id}")
+                if not report.user_id or not report.report_id:
+                    logger.error(f"Invalid user_id={report.user_id} or report_id={report.report_id}")
+                    raise ValueError("Invalid user_id or report_id")
+                
+                resolved_time = report.resolved_at
+                formatted_time = resolved_time.strftime("%H:%M %d/%m/%Y")
+                notification = Notification(
+                    title="Báo cáo của bạn đã được giải quyết",
+                    message=f"Báo cáo của bạn đã được giải quyết. Thời gian giải quyết: {formatted_time}",
+                    target_type="SYSTEM",
+                    target_id=report.user_id,
+                    related_entity_type="REPORT",
+                    related_entity_id=report.report_id,
+                    created_at=datetime.utcnow()
+                )
+                db.session.add(notification)
+                db.session.flush()
+                logger.debug(f"Notification added, id={notification.id}")
+
+                recipient = NotificationRecipient(
+                    notification_id=notification.id,
+                    user_id=report.user_id,
+                    is_read=False
+                )
+                db.session.add(recipient)
+                logger.debug(f"NotificationRecipient added for notification_id={notification.id}")
+                notification_created = True
+                notification_id = notification.id
+
+                send_fcm_notification(
+                    user_id=report.user_id,
+                    title=notification.title,
+                    message=notification.message,
+                    data={
+                        'notification_id': str(notification.id),
+                        'related_entity_type': 'REPORT',
+                        'related_entity_id': str(report.report_id)
+                        }
+                )
+            except Exception as e:
+                db.session.rollback()
+                logger.error(f"Failed to create SYSTEM notification for user {report.user_id}, report {report.report_id}: {str(e)}")
+                return jsonify({'message': f'Lỗi khi tạo thông báo: {str(e)}'}), 500
         elif status == 'CLOSED' and old_status != 'CLOSED':
             report.closed_at = datetime.utcnow()
 
         try:
             db.session.commit()
-            logger.info("Cập nhật trạng thái báo cáo thành công: report_id=%s, status=%s", report_id, status)
+            if notification_created:
+                logger.info(f"Report status updated and notification created: report_id={report_id}, status={status}, notification_id={notification_id}")
+            else:
+                logger.info(f"Report status updated: report_id={report_id}, status={status}")
             return jsonify(report.to_dict()), 200
         except Exception as e:
             db.session.rollback()
@@ -537,7 +634,7 @@ def delete_report(report_id):
             image.is_deleted = True
             image.deleted_at = datetime.utcnow()
             image.report_id = None
-            logger.debug("Marked ReportImage as deleted: image_id=%s, report_id=None", image.image_id)
+            logger.debug("Marked ReportImage as deleted: image_ id=%s, report_id=None", image.image_id)
 
         db.session.delete(report)
 

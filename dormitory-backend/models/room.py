@@ -10,6 +10,7 @@ class Room(db.Model):
     description = db.Column(db.Text)
     status = db.Column(db.Enum('AVAILABLE', 'OCCUPIED', 'MAINTENANCE', 'DISABLED'), default='AVAILABLE', nullable=False)
     area_id = db.Column(db.Integer, db.ForeignKey('area.area_id', ondelete='RESTRICT'), nullable=False)
+    is_deleted = db.Column(db.Boolean, default=False)
     
     area = db.relationship('Area', backref='rooms', lazy=True)
     bills = db.relationship('MonthlyBill', back_populates='room', lazy=True)

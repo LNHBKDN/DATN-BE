@@ -213,7 +213,7 @@ def delete_admin(admin_id):
         return jsonify({'message': 'Lỗi server', 'error': str(e)}), 500
 
 # Thay đổi mật khẩu admin
-@admin_bp.route('/me/password', methods=['PUT'])
+@admin_bp.route('/admin/password', methods=['PUT'])
 @jwt_required()
 def change_admin_password():
     try:

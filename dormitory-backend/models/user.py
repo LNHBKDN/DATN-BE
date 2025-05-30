@@ -18,6 +18,7 @@ class User(db.Model):
     is_deleted = db.Column(db.Boolean, default=False, nullable=False)
     deleted_at = db.Column(db.TIMESTAMP)
     version = db.Column(db.Integer, default=1, nullable=False)
+    fcm_token = db.Column(db.String(255), nullable=True)
     
     bills = db.relationship('MonthlyBill', back_populates='user', lazy=True)
     submitted_bill_details = db.relationship('BillDetail', back_populates='submitter', lazy=True)

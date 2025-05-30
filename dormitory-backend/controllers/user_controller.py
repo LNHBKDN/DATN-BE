@@ -1,8 +1,10 @@
-from flask import Blueprint, request, jsonify, current_app
+from flask import Blueprint, request, jsonify, current_app, send_from_directory, render_template
 from flask_jwt_extended import jwt_required, get_jwt_identity, get_jwt
 from extensions import db, mail, limiter
 from models.user import User
 from models.token_blacklist import TokenBlacklist
+from models.refresh_tokens import RefreshToken  # Import the new RefreshToken model
+from models.notification import Notification
 from controllers.auth_controller import admin_required, user_required
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_mail import Message
@@ -17,9 +19,7 @@ from PIL import Image
 from sqlalchemy.exc import SQLAlchemyError
 import shutil
 import re
-from flask import render_template
-
-
+from utils.fcm import send_fcm_notification
 # Thiết lập logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -93,22 +93,11 @@ class PasswordChangeSchema(BaseModel):
             raise ValueError('Mật khẩu mới phải dài ít nhất 12 ký tự')
         return v
 
-# Hàm tiện ích
-def allowed_file(filename, file):
-    """Kiểm tra file có hợp lệ dựa trên MIME type."""
-    return '.' in filename and file.mimetype in {'image/png', 'image/jpeg', 'image/gif'}
-
-def create_user_directory(email, fullname):
-    """Tạo thư mục cho user dựa trên email và fullname."""
-    safe_email = secure_filename(email.split('@')[0])
-    safe_fullname = ''.join(word.capitalize() for word in fullname.split())
-    user_dir = os.path.join(current_app.config['AVATAR_UPLOAD_FOLDER'], f"{safe_email}_{safe_fullname}")
-    try:
-        os.makedirs(user_dir, exist_ok=True)
-        return user_dir
-    except OSError as e:
-        logger.error(f"Error creating directory {user_dir}: {str(e)}")
-        raise
+ALLOWED_MIME_TYPES = {
+    'image/png', 'image/jpeg', 'image/gif',
+    'image/webp', 'image/bmp', 'image/tiff',
+    'image/heic', 'image/heif'
+}
 
 def move_to_trash(file_path):
     """Di chuyển file vào thư mục trash."""
@@ -126,7 +115,7 @@ def move_to_trash(file_path):
 @user_bp.route('/users', methods=['GET'])
 @admin_required()
 def get_all_users():
-    """Lấy danh sách tất cả người dùng với bộ lọc và phân trang."""
+    """Lấy danh sách tất cả người dùng đã bị xóa mềm với bộ lọc và phân trang."""
     try:
         page = request.args.get('page', 1, type=int)
         limit = request.args.get('limit', 10, type=int)
@@ -172,28 +161,22 @@ def get_user_by_id(user_id):
 @user_bp.route('/admin/users', methods=['POST'])
 @admin_required()
 def create_user():
-    """Tạo người dùng mới và gửi email chào mừng chứa thông tin đăng nhập."""
     try:
         logger.debug("Starting create_user with request: %s", request.get_json())
         data = UserCreateSchema(**request.get_json())
         logger.debug("Validated data: %s", data)
 
-        # Kiểm tra trùng lặp email
         if User.query.filter_by(email=data.email).first():
             logger.debug("Email %s already in use", data.email)
             return jsonify({'message': 'Email đã được sử dụng'}), 400
 
-        # Kiểm tra trùng lặp phone (nếu có)
         if data.phone and User.query.filter_by(phone=data.phone).first():
             logger.debug("Phone %s already in use", data.phone)
             return jsonify({'message': 'Số điện thoại đã được sử dụng'}), 400
 
-        # Tạo mật khẩu ngẫu nhiên
-        raw_password = secrets.token_urlsafe(12)  # Mật khẩu 16 ký tự ngẫu nhiên
+        raw_password = secrets.token_urlsafe(12)
         password_hash = generate_password_hash(raw_password)
 
-        user_dir = create_user_directory(data.email, data.fullname)
-        logger.debug("Created directory: %s", user_dir)
         user = User(
             email=data.email,
             password_hash=password_hash,
@@ -206,7 +189,30 @@ def create_user():
         db.session.commit()
         logger.debug("User created with ID: %s", user.user_id)
 
-        # Gửi email chào mừng
+        try:
+            notification = Notification(
+                title="Tài khoản của bạn đã được tạo",
+                message="Chào mừng bạn đến với hệ thống! Vui lòng đổi mật khẩu của bạn để đảm bảo an toàn.",
+                target_type="SYSTEM",
+                target_id=user.user_id,
+                related_entity_type="USER",
+                related_entity_id=user.user_id,
+                created_at=datetime.utcnow()
+            )
+            db.session.add(notification)
+            db.session.flush()
+            recipient = NotificationRecipient(
+                notification_id=notification.id,
+                user_id=user.user_id,
+                is_read=False
+            )
+            db.session.add(recipient)
+            db.session.commit()
+            logger.info(f"Notification created for user {user.user_id}, notification_id={notification.id}")
+        except Exception as e:
+            db.session.rollback()
+            logger.error(f"Failed to create SYSTEM notification for user {user.user_id}: {str(e)}")
+
         msg = Message(
             subject='Chào mừng đến với Hệ thống Ký túc xá',
             sender=current_app.config.get('MAIL_DEFAULT_SENDER', 'no-reply@dormitory.com'),
@@ -279,25 +285,6 @@ def update_user(user_id):
             logger.warning(f"CCCD already in use: {user.CCCD}")
             return jsonify({'message': 'CCCD đã được sử dụng bởi người dùng khác'}), 400
 
-        if data.email or data.fullname:
-            old_dir = create_user_directory(old_email, old_fullname)
-            new_dir = create_user_directory(user.email, user.fullname)
-            if os.path.exists(old_dir) and old_dir != new_dir:
-                try:
-                    logger.debug(f"Moving avatar directory from {old_dir} to {new_dir}")
-                    shutil.move(old_dir, new_dir)
-                    if user.avatar_url:
-                        old_safe_fullname = secure_filename(old_fullname.replace(' ', '_').lower())
-                        new_safe_fullname = secure_filename(user.fullname.replace(' ', '_').lower())
-                        user.avatar_url = user.avatar_url.replace(
-                            f"/Uploads/avatars/{secure_filename(old_email.split('@')[0])}_{old_safe_fullname}/",
-                            f"/Uploads/avatars/{secure_filename(user.email.split('@')[0])}_{new_safe_fullname}/"
-                        )
-                        logger.debug(f"Updated avatar_url: {user.avatar_url}")
-                except Exception as e:
-                    logger.error(f"Error moving directory {old_dir} to {new_dir}: {str(e)}")
-                    logger.warning("Continuing despite directory move error")
-
         db.session.commit()
         logger.info(f"User updated successfully: user_id={user_id}")
         return jsonify(user.to_dict()), 200
@@ -321,13 +308,18 @@ def update_user(user_id):
 @user_bp.route('/admin/users/<int:user_id>', methods=['DELETE'])
 @admin_required()
 def delete_user(user_id):
-    """Soft delete người dùng."""
+    """Soft delete người dùng và thu hồi tất cả refresh token."""
     try:
         logger.debug(f"Admin deleting user_id={user_id}")
         user = User.query.filter_by(user_id=user_id, is_deleted=False).first()
         if not user:
             logger.warning(f"User not found: user_id={user_id}")
             return jsonify({'message': 'Không tìm thấy người dùng'}), 404
+
+        # Revoke all refresh tokens for this user
+        refresh_tokens = RefreshToken.query.filter_by(user_id=user_id, type='USER', revoked_at=None).all()
+        for token in refresh_tokens:
+            token.revoked_at = datetime.utcnow()
 
         user.is_deleted = True
         user.deleted_at = datetime.utcnow()
@@ -390,27 +382,6 @@ def update_user_profile():
             logger.warning(f"CCCD already in use: {user.CCCD}")
             return jsonify({'message': 'CCCD đã được sử dụng bởi người dùng khác'}), 400
 
-        # Đổi tên thư mục avatar nếu fullname thay đổi
-        if data.fullname and data.fullname != old_fullname:
-            logger.debug(f"Fullname changed from '{old_fullname}' to '{data.fullname}'")
-            old_dir = create_user_directory(user.email, old_fullname)
-            new_dir = create_user_directory(user.email, user.fullname)
-            if os.path.exists(old_dir) and old_dir != new_dir:
-                try:
-                    logger.debug(f"Moving avatar directory from {old_dir} to {new_dir}")
-                    shutil.move(old_dir, new_dir)
-                    if user.avatar_url:
-                        old_safe_fullname = secure_filename(old_fullname.replace(' ', '_').lower())
-                        new_safe_fullname = secure_filename(user.fullname.replace(' ', '_').lower())
-                        user.avatar_url = user.avatar_url.replace(
-                            f"/Uploads/avatars/{secure_filename(user.email.split('@')[0])}_{old_safe_fullname}/",
-                            f"/Uploads/avatars/{secure_filename(user.email.split('@')[0])}_{new_safe_fullname}/"
-                        )
-                        logger.debug(f"Updated avatar_url: {user.avatar_url}")
-                except Exception as e:
-                    logger.error(f"Error moving directory from {old_dir} to {new_dir}: {str(e)}")
-                    logger.warning("Continuing despite directory move error")
-
         db.session.commit()
         logger.info(f"Profile updated successfully for user_id={user_id}")
         return jsonify(user.to_dict()), 200
@@ -431,11 +402,11 @@ def update_user_profile():
         logger.error(f"Unexpected error updating profile for user {user_id}: {str(e)}")
         return jsonify({'message': 'Lỗi không xác định'}), 500
 
-@user_bp.route('/me/password', methods=['PUT'])
+@user_bp.route('/user/password', methods=['PUT'])
 @limiter.limit("5 per minute")
 @user_required()
 def change_password():
-    """Đổi mật khẩu với kiểm tra bảo mật và thu hồi token cũ."""
+    """Đổi mật khẩu với kiểm tra bảo mật và thu hồi tất cả token."""
     try:
         user_id = get_jwt_identity()
         logger.debug(f"User ID from JWT: {user_id}")
@@ -459,8 +430,11 @@ def change_password():
             user.reset_attempts += 1
             user.reset_token_expiry = datetime.utcnow() + timedelta(minutes=15)  # Khóa 15 phút
             db.session.commit()
+            remaining_attempts = 5 - user.reset_attempts
             logger.warning(f"Failed password attempt for user {user.email}, attempts: {user.reset_attempts}, IP: {request.remote_addr}")
-            return jsonify({'message': 'Mật khẩu cũ không đúng'}), 401
+            return jsonify({
+                'message': f'Mật khẩu cũ không đúng. Bạn còn {remaining_attempts} lần thử.'
+            }), 401
 
         # Reset attempts sau khi xác thực đúng
         user.reset_attempts = 0
@@ -473,6 +447,11 @@ def change_password():
             return jsonify({
                 'message': 'Mật khẩu mới phải dài ít nhất 12 ký tự, chứa chữ hoa, chữ thường, số và ký tự đặc biệt (@$!%*?&)'
             }), 400
+
+        # Thu hồi tất cả refresh token của user
+        refresh_tokens = RefreshToken.query.filter_by(user_id=user_id, type='USER', revoked_at=None).all()
+        for token in refresh_tokens:
+            token.revoked_at = datetime.utcnow()
 
         # Thu hồi token hiện tại
         claims = get_jwt()
@@ -520,9 +499,8 @@ def change_password():
         return jsonify({'message': 'Lỗi database'}), 500
 
 @user_bp.route('/me/avatar', methods=['PUT'])
-@user_required()
+@jwt_required()
 def update_user_avatar():
-    """Cập nhật ảnh đại diện của user."""
     try:
         user_id = get_jwt_identity()
         logger.debug(f"User ID from JWT: {user_id}")
@@ -531,7 +509,6 @@ def update_user_avatar():
             logger.warning(f"User not found: user_id={user_id}")
             return jsonify({'message': 'Không tìm thấy người dùng'}), 404
 
-        logger.debug(f"User found: email={user.email}, fullname={user.fullname}")
         if 'avatar' not in request.files:
             logger.warning("No avatar file in request")
             return jsonify({'message': 'Yêu cầu file ảnh (key: avatar)'}), 400
@@ -541,10 +518,12 @@ def update_user_avatar():
             logger.warning("Empty or no file selected")
             return jsonify({'message': 'Không có file được chọn'}), 400
 
-        logger.debug(f"File received: filename={file.filename}, mimetype={file.mimetype}")
-        if not allowed_file(file.filename, file):
-            logger.warning(f"Invalid file type: filename={file.filename}, mimetype={file.mimetype}")
-            return jsonify({'message': 'File không phải ảnh hợp lệ (chỉ hỗ trợ PNG, JPG, GIF)'}), 400
+        # Kiểm tra Content-Type từ client
+        file_mime_type = file.content_type
+        logger.debug(f"File received: filename={file.filename}, mimetype={file_mime_type}")
+        if file_mime_type not in ALLOWED_MIME_TYPES:
+            logger.warning(f"Invalid file type: filename={file.filename}, mimetype={file_mime_type}")
+            return jsonify({'message': 'File không phải ảnh hợp lệ (chỉ hỗ trợ PNG, JPG, GIF, WEBP, BMP, TIFF, HEIC, HEIF)'}), 400
 
         # Xử lý ảnh cũ nếu có
         if user.avatar_url:
@@ -558,14 +537,13 @@ def update_user_avatar():
             except Exception as e:
                 logger.error(f"Error moving old avatar to trash: {str(e)}")
 
-        # Tạo thư mục con theo email và tên user
-        logger.debug("Creating user directory")
-        user_dir = create_user_directory(user.email, user.fullname)
-        logger.debug(f"User directory created: {user_dir}")
+        # Lưu ảnh trực tiếp vào thư mục gốc của avatar
+        avatar_dir = current_app.config['AVATAR_UPLOAD_FOLDER']
+        logger.debug(f"Avatar directory: {avatar_dir}")
 
         # Tạo tên file duy nhất
         filename = secure_filename(f"avatar_{user_id}_{datetime.utcnow().timestamp()}.jpg")
-        file_path = os.path.join(user_dir, filename)
+        file_path = os.path.join(avatar_dir, filename)
         logger.debug(f"File path: {file_path}")
 
         # Resize và lưu ảnh
@@ -585,15 +563,19 @@ def update_user_avatar():
 
         # Tạo URL công khai
         base_url = request.host_url.rstrip('/')
-        safe_email = secure_filename(user.email.split('@')[0])
-        safe_fullname = secure_filename(user.fullname.replace(' ', '_').lower())
-        image_url = f"{base_url}/Uploads/avatars/{safe_email}_{safe_fullname}/{filename}"
+        image_url = f"{base_url}/api/avatars/{filename}"
         logger.debug(f"Generated image URL: {image_url}")
 
         user.avatar_url = image_url
         user.version += 1
-        db.session.commit()
-        logger.info(f"Avatar updated successfully for user_id={user_id}")
+        try:
+            db.session.commit()
+            logger.info(f"Avatar updated successfully for user_id={user_id}, avatar_url={user.avatar_url}")
+        except SQLAlchemyError as e:
+            db.session.rollback()
+            logger.error(f"Database commit error while updating avatar for user_id={user_id}: {str(e)}")
+            return jsonify({'message': 'Lỗi lưu avatar vào cơ sở dữ liệu'}), 500
+
         return jsonify(user.to_dict()), 200
 
     except SQLAlchemyError as e:
@@ -631,7 +613,7 @@ def update_user_avatar_admin(user_id):
         logger.debug(f"File received: filename={file.filename}, mimetype={file.mimetype}")
         if not allowed_file(file.filename, file):
             logger.warning(f"Invalid file type: filename={file.filename}, mimetype={file.mimetype}")
-            return jsonify({'message': 'File không phải ảnh hợp lệ (chỉ hỗ trợ PNG, JPG, GIF)'}), 400
+            return jsonify({'message': 'File không phải ảnh hợp lệ (chỉ hỗ trợ PNG, JPG, GIF, WEBP, BMP, TIFF, HEIC, HEIF)'}), 400
 
         # Xử lý ảnh cũ nếu có
         if user.avatar_url:
@@ -645,14 +627,13 @@ def update_user_avatar_admin(user_id):
             except Exception as e:
                 logger.error(f"Error moving old avatar to trash: {str(e)}")
 
-        # Tạo thư mục con theo email và tên user
-        logger.debug("Creating user directory")
-        user_dir = create_user_directory(user.email, user.fullname)
-        logger.debug(f"User directory created: {user_dir}")
+        # Lưu ảnh trực tiếp vào thư mục gốc của avatar
+        avatar_dir = current_app.config['AVATAR_UPLOAD_FOLDER']
+        logger.debug(f"Avatar directory: {avatar_dir}")
 
         # Tạo tên file duy nhất
         filename = secure_filename(f"avatar_{user_id}_{datetime.utcnow().timestamp()}.jpg")
-        file_path = os.path.join(user_dir, filename)
+        file_path = os.path.join(avatar_dir, filename)
         logger.debug(f"File path: {file_path}")
 
         # Resize và lưu ảnh
@@ -672,9 +653,7 @@ def update_user_avatar_admin(user_id):
 
         # Tạo URL công khai
         base_url = request.host_url.rstrip('/')
-        safe_email = secure_filename(user.email.split('@')[0])
-        safe_fullname = secure_filename(user.fullname.replace(' ', '_').lower())
-        image_url = f"{base_url}/Uploads/avatars/{safe_email}_{safe_fullname}/{filename}"
+        image_url = f"{base_url}/api/avatars/{filename}"
         logger.debug(f"Generated image URL: {image_url}")
 
         user.avatar_url = image_url
@@ -693,3 +672,49 @@ def update_user_avatar_admin(user_id):
     except Exception as e:
         logger.error(f"Error uploading avatar for user {user_id}: {str(e)}")
         return jsonify({'message': 'Lỗi upload ảnh'}), 500
+
+@user_bp.route('/Uploads/avatars/<filename>', methods=['GET'])
+def serve_avatar(filename):
+    """Phục vụ ảnh đại diện từ thư mục avatars."""
+    try:
+        logger.debug(f"Serving avatar: {filename}")
+        avatar_dir = current_app.config['AVATAR_UPLOAD_FOLDER']
+        if not os.path.exists(os.path.join(avatar_dir, filename)):
+            logger.warning(f"Avatar file not found: {filename}")
+            return jsonify({'message': 'Không tìm thấy ảnh'}), 404
+        return send_from_directory(avatar_dir, filename)
+    except Exception as e:
+        logger.error(f"Error serving avatar {filename}: {str(e)}")
+        return jsonify({'message': 'Lỗi đọc ảnh'}), 500
+
+@user_bp.route('/me/update-fcm-token', methods=['PUT'])
+@jwt_required()
+def update_fcm_token():
+    identity = get_jwt_identity()
+    user_id = int(identity)
+    data = request.get_json()
+    logger.debug(f"Updating FCM token for user_id={user_id}, data={data}")
+
+    if not data or 'fcm_token' not in data:
+        logger.warning(f"Missing fcm_token for user_id={user_id}")
+        return jsonify({'message': 'Yêu cầu fcm_token'}), 400
+
+    fcm_token = data.get('fcm_token')
+    if not isinstance(fcm_token, str) or not fcm_token.strip():
+        logger.warning(f"Invalid fcm_token for user_id={user_id}: {fcm_token}")
+        return jsonify({'message': 'fcm_token phải là chuỗi không rỗng'}), 400
+
+    user = User.query.get(user_id)
+    if not user:
+        logger.error(f"User not found: user_id={user_id}")
+        return jsonify({'message': 'Không tìm thấy người dùng'}), 404
+
+    user.fcm_token = fcm_token
+    try:
+        db.session.commit()
+        logger.info(f"Updated FCM token for user_id={user_id}, token={fcm_token}")
+        return jsonify({'message': 'Cập nhật FCM token thành công'}), 200
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error updating FCM token for user_id={user_id}: {str(e)}")
+        return jsonify({'message': 'Lỗi database khi cập nhật FCM token'}), 500

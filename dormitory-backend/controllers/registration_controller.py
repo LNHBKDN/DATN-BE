@@ -122,8 +122,8 @@ def get_all_registrations():
     name_student = request.args.get('name_student', type=str)
     meeting_datetime = request.args.get('meeting_datetime', type=str)
 
-    # Bắt đầu với query cơ bản
-    query = Register.query
+    # Bắt đầu với query cơ bản, chỉ lấy các đăng ký chưa bị xóa mềm
+    query = Register.query.filter_by(is_deleted=False)
 
     # Áp dụng các bộ lọc nếu có
     if status:
@@ -154,9 +154,9 @@ def get_all_registrations():
 @registration_bp.route('/registrations/<int:registration_id>', methods=['GET'])
 @admin_required()
 def get_registration_by_id(registration_id):
-    registration = Register.query.get(registration_id)
+    registration = Register.query.filter_by(registration_id=registration_id, is_deleted=False).first()
     if not registration:
-        return jsonify({'message': 'Không tìm thấy yêu cầu đăng ký'}), 404
+        return jsonify({'message': 'Không tìm thấy yêu cầu đăng ký hoặc đã bị xóa'}), 404
     data = registration.to_dict()
     print(f"Response data: {data}")
     return jsonify(registration.to_dict()), 200
@@ -303,18 +303,31 @@ def delete_registrations_batch():
             return jsonify({'message': 'Yêu cầu danh sách registration_ids trong body'}), 400
 
         registration_ids = data['registration_ids']
-        if not isinstance(registration_ids, list) or not registration_ids:
-            return jsonify({'message': 'Danh sách registration_ids không hợp lệ hoặc trống'}), 400
+        if not isinstance(registration_ids, list):
+            return jsonify({'message': 'Danh sách registration_ids phải là một mảng'}), 400
+
+        # Nếu danh sách rỗng, trả về thông báo thành công với deleted_ids rỗng
+        if not registration_ids:
+            return jsonify({
+                'message': 'Không có đăng ký nào được chọn để xóa',
+                'deleted_ids': [],
+                'errors': []
+            }), 200
 
         # Kiểm tra từng registration_id
         valid_ids = []
         errors = []
-        current_time = datetime.now()  # Lấy thời gian hiện tại
+        current_time = datetime.utcnow()
 
         for reg_id in registration_ids:
             registration = Register.query.get(reg_id)
             if not registration:
                 errors.append({'registration_id': reg_id, 'error': 'Không tìm thấy đăng ký'})
+                continue
+
+            # Nếu đã bị xóa mềm, bỏ qua
+            if registration.is_deleted:
+                errors.append({'registration_id': reg_id, 'error': 'Đăng ký đã bị xóa'})
                 continue
 
             # Nếu trạng thái là PENDING, không cho phép xóa
@@ -334,18 +347,19 @@ def delete_registrations_batch():
         if not valid_ids:
             return jsonify({'message': 'Không có đăng ký nào trong danh sách thỏa mãn điều kiện để xóa', 'errors': errors}), 200
 
-        # Xóa các đăng ký hợp lệ
+        # Đánh dấu xóa mềm các đăng ký hợp lệ
         deleted_ids = []
         for reg_id in valid_ids:
             registration = Register.query.get(reg_id)
-            db.session.delete(registration)
+            registration.is_deleted = True
+            registration.deleted_at = datetime.utcnow()
             deleted_ids.append(reg_id)
 
         db.session.commit()
 
         # Trả về kết quả
         response = {
-            'message': f'Đã xóa thành công {len(deleted_ids)} đăng ký',
+            'message': f'Đã đánh dấu xóa thành công {len(deleted_ids)} đăng ký',
             'deleted_ids': deleted_ids,
             'errors': errors if errors else []
         }
