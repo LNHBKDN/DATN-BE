@@ -402,7 +402,7 @@ def create_monthly_bills_bulk():
                     notification = Notification(
                         title="Hóa đơn mới đã được tạo",
                         message=f"Hóa đơn của dịch vụ {service.name} cho tháng {bill.bill_month.strftime('%Y-%m')} đã được tạo. Tổng tiền: {bill.total_amount} VND. Vui lòng thanh toán sớm nhất có thể.",
-                        target_type="ROOM",
+                        target_type="SYSTEM",
                         target_id=bill.room_id,
                         related_entity_type="MONTHLY_BILL",
                         related_entity_id=bill.bill_id,
