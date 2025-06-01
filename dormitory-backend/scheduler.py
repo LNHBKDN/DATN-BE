@@ -18,6 +18,7 @@ import pendulum
 import shutil
 from flask import current_app
 import json
+from controllers.statistics_controller import save_room_status_snapshot, save_user_room_snapshot
 
 # Thiết lập logging
 logging.basicConfig(level=logging.INFO)
@@ -476,6 +477,20 @@ def init_scheduler(app):
         day=31,
         hour=0,
         minute=0
+    )
+    scheduler.add_job(
+        save_room_status_snapshot,
+        'cron',
+        day='last',
+        hour=23,
+        minute=59
+    )
+    scheduler.add_job(
+        save_user_room_snapshot,
+        'cron',
+        day='last',
+        hour=23,
+        minute=59
     )
     scheduler.start()
     logger.info("Scheduler initialized for cleanup tasks.")

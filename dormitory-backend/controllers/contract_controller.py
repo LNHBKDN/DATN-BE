@@ -5,7 +5,10 @@ from extensions import db
 from models.contract import Contract
 from models.user import User
 from models.room import Room
-from models.notification import Notification  # Import Notification model
+from models.notification import Notification
+from models.notification_recipient import NotificationRecipient
+from models.user_room_history import UserRoomHistory
+from models.room_status_history import RoomStatusHistory
 from controllers.auth_controller import admin_required, user_required
 from datetime import datetime, date, timedelta
 from sqlalchemy.exc import IntegrityError
@@ -242,16 +245,19 @@ def create_contract():
         if not all([email, room_name, area_id, start_date, end_date, contract_type]):
             return jsonify({'message': 'Yêu cầu email, room_name, area_id, start_date, end_date và contract_type'}), 400
 
+        # Validate user
         user = User.query.filter_by(email=email).first()
         if not user:
             return jsonify({'message': 'Không tìm thấy người dùng với email này'}), 404
         user_id = user.user_id
 
+        # Validate room
         room = Room.query.filter_by(name=room_name, area_id=area_id).first()
         if not room:
             return jsonify({'message': 'Không tìm thấy phòng với tên và khu vực này'}), 404
         room_id = room.room_id
 
+        # Validate dates
         try:
             start_date = parse_date(start_date).date()
             end_date = parse_date(end_date).date()
@@ -263,17 +269,22 @@ def create_contract():
         except ValueError:
             return jsonify({'message': 'Định dạng ngày không hợp lệ (YYYY-MM-DD)'}), 400
 
+        # Validate contract type
         if contract_type not in ['SHORT_TERM', 'LONG_TERM']:
             return jsonify({'message': 'Loại hợp đồng phải là SHORT_TERM hoặc LONG_TERM'}), 400
 
+        # Check for existing contract for user
         existing_contract = Contract.query.filter_by(user_id=user_id).first()
         if existing_contract:
             return jsonify({'message': 'Người dùng đã có hợp đồng, không thể tạo hợp đồng mới'}), 400
 
+        # Lock room and check capacity
         room = Room.query.with_for_update().get(room_id)
-        if room.current_person_number >= room.capacity:
+        active_contracts = Contract.query.filter_by(room_id=room_id, status='ACTIVE').count()
+        if active_contracts >= room.capacity:
             return jsonify({'message': 'Phòng đã đầy'}), 400
 
+        # Create contract
         contract = Contract(
             user_id=user_id,
             room_id=room_id,
@@ -284,10 +295,56 @@ def create_contract():
         )
         db.session.add(contract)
 
+        # Update room if contract is ACTIVE
         if contract.status == 'ACTIVE':
-            room.current_person_number += 1
+            room.current_person_number = active_contracts + 1
             room.status = 'OCCUPIED' if room.current_person_number >= room.capacity else 'AVAILABLE'
             logger.debug(f"Updated current_person_number for room {room_id}: {room.current_person_number}")
+
+        # Update RoomStatusHistory and UserRoomHistory
+        current_time = datetime.utcnow()
+        year = current_time.year
+        month = current_time.month
+
+        # Update UserRoomHistory
+        existing_user_history = UserRoomHistory.query.filter_by(
+            room_id=room_id, year=year, month=month
+        ).first()
+        if existing_user_history:
+            existing_user_history.user_count = room.current_person_number
+            existing_user_history.updated_at = current_time
+        else:
+            user_history = UserRoomHistory(
+                area_id=room.area_id,
+                room_id=room_id,
+                room_name=room.name,
+                year=year,
+                month=month,
+                user_count=room.current_person_number,
+                created_at=current_time,
+                updated_at=current_time
+            )
+            db.session.add(user_history)
+
+        # Update RoomStatusHistory
+        existing_room_history = RoomStatusHistory.query.filter_by(
+            room_id=room_id, year=year, month=month
+        ).first()
+        if existing_room_history:
+            existing_room_history.status = room.status
+            existing_room_history.updated_at = current_time
+        else:
+            room_history = RoomStatusHistory(
+                area_id=room.area_id,
+                room_id=room_id,
+                room_name=room.name,
+                year=year,
+                month=month,
+                status=room.status,
+                created_at=current_time,
+                updated_at=current_time
+            )
+            db.session.add(room_history)
 
         db.session.commit()
         logger.info(f"Contract created with contract_id={contract.contract_id}")
