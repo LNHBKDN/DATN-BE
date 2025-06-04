@@ -27,7 +27,7 @@ ALLOWED_EXTENSIONS = {'jpg', 'jpeg', 'png', 'mp4', 'avi', 'pdf', 'doc', 'docx'}
 IMAGE_EXTENSIONS = {'jpg', 'jpeg', 'png'}
 VIDEO_EXTENSIONS = {'mp4', 'avi'}
 DOCUMENT_EXTENSIONS = {'pdf', 'doc', 'docx'}
-MAX_FILES = 15
+MAX_FILES = 20  # Tăng từ 15 lên 20
 MAX_IMAGES = 10
 MAX_DOCUMENTS = 5
 MAX_IMAGE_SIZE = 50 * 1024 * 1024  # 50MB mỗi ảnh
@@ -458,7 +458,7 @@ def create_notification():
 # UpdateNotification (Admin)
 @notification_bp.route('/admin/notifications/<int:notification_id>', methods=['PUT'])
 @admin_required()
-def update_notification():
+def update_notification(notification_id):
     try:
         notification = Notification.query.get(notification_id)
         if not notification:

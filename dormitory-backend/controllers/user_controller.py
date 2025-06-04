@@ -5,6 +5,7 @@ from models.user import User
 from models.token_blacklist import TokenBlacklist
 from models.refresh_tokens import RefreshToken  # Import the new RefreshToken model
 from models.notification import Notification
+from models.notification_recipient import NotificationRecipient
 from controllers.auth_controller import admin_required, user_required
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_mail import Message
@@ -611,6 +612,11 @@ def update_user_avatar_admin(user_id):
             return jsonify({'message': 'Không có file được chọn'}), 400
 
         logger.debug(f"File received: filename={file.filename}, mimetype={file.mimetype}")
+        def allowed_file(filename, file_obj):
+            ext = os.path.splitext(filename)[1].lower()
+            allowed_exts = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.tiff', '.heic', '.heif'}
+            return ext in allowed_exts and file_obj.mimetype in ALLOWED_MIME_TYPES
+
         if not allowed_file(file.filename, file):
             logger.warning(f"Invalid file type: filename={file.filename}, mimetype={file.mimetype}")
             return jsonify({'message': 'File không phải ảnh hợp lệ (chỉ hỗ trợ PNG, JPG, GIF, WEBP, BMP, TIFF, HEIC, HEIF)'}), 400

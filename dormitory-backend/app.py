@@ -12,7 +12,6 @@ from flask_limiter.util import get_remote_address
 from flask_caching import Cache
 from flask_cors import CORS
 from celery import Celery
-from celery.schedules import crontab
 from models.refresh_tokens import RefreshToken
 import firebase_admin
 from firebase_admin import credentials, messaging
@@ -53,14 +52,6 @@ def make_celery(app):
         backend=app.config['CELERY_RESULT_BACKEND']
     )
     celery.conf.update(app.config)
-    
-    # Lập lịch snapshot mỗi 15 phút
-    celery.conf.beat_schedule = {
-        'run-snapshots-every-15-minutes': {
-            'task': 'tasks.snapshot_tasks.run_snapshots',
-            'schedule': crontab(minute='*/15'),
-        },
-    }
     
     class ContextTask(celery.Task):
         def __call__(self, *args, **kwargs):
@@ -190,7 +181,7 @@ app.register_blueprint(report_type_bp, url_prefix='/api')
 app.register_blueprint(notification_type_bp, url_prefix='/api')
 app.register_blueprint(statistics_bp, url_prefix='/api')
 
-# Debug routes, file serving, error handlers, JWT blocklist loader (giữ nguyên)
+# Debug routes, file serving, error handlers, JWT blocklist loader
 @app.route('/debug/routes')
 def debug_routes():
     routes = []

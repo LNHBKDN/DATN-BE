@@ -15,6 +15,8 @@ class Room(db.Model):
     area = db.relationship('Area', backref='rooms', lazy=True)
     bills = db.relationship('MonthlyBill', back_populates='room', lazy=True)
 
+    ALLOWED_STATUSES = ['AVAILABLE', 'OCCUPIED', 'MAINTENANCE', 'DISABLED']
+    
     def to_dict(self):
         return {
             'room_id': self.room_id,

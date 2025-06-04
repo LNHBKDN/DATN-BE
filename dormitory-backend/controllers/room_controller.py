@@ -49,7 +49,13 @@ def update_current_person_number(room_id=None):
         for room in rooms_query:
             active_count = db.session.query(contract_counts.c.active_count).filter(contract_counts.c.room_id == room.room_id).scalar() or 0
             room.current_person_number = active_count
-            room.status = 'OCCUPIED' if active_count >= room.capacity else 'AVAILABLE'
+            old_status = room.status
+            if room.status not in ['MAINTENANCE', 'DISABLED']:
+                room.status = 'OCCUPIED' if active_count >= room.capacity else 'AVAILABLE'
+                if old_status != room.status:
+                    logger.info(f"Room {room.room_id}: Changed status from {old_status} to {room.status}")
+            else:
+                logger.info(f"Room {room.room_id}: Skipped status update (current status: {room.status})")
 
         db.session.commit()
         logger.info(f"Updated current_person_number for {'room ' + str(room_id) if room_id else 'all rooms'}")
@@ -283,6 +289,11 @@ def update_room(room_id):
         description = data.get('description', room.description)
         status = data.get('status', room.status)
         area_id = data.get('area_id', room.area_id, type=int)
+
+        # Validate status
+        if status not in Room.ALLOWED_STATUSES:
+            logger.warning(f"Invalid status provided: {status}")
+            return jsonify({'message': f'Trạng thái không hợp lệ. Phải là một trong {Room.ALLOWED_STATUSES}'}), 400
 
         # Kiểm tra khu vực
         area = Area.query.get(area_id)

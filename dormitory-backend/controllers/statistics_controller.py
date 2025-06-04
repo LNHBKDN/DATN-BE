@@ -1,8 +1,8 @@
-# backend/controllers/statistics_controller.py
 from flask import Blueprint, jsonify, request
 from extensions import db
 from sqlalchemy import func, extract, and_, or_
-from datetime import datetime, timedelta
+from datetime import datetime
+import pendulum
 from models.service import Service
 from models.service_rate import ServiceRate
 from models.bill_detail import BillDetail
@@ -22,187 +22,78 @@ logger = logging.getLogger(__name__)
 
 statistics_bp = Blueprint('statistics', __name__)
 
-def save_user_room_snapshot(target_year=None, target_month=None):
+def snapshot_room_status(year, month, room_id=None):
+    """Snapshot room status for non-deleted rooms or a specific non-deleted room for a given year and month."""
     try:
+        logger.info(f"Starting room status snapshot for {year}-{month}, room_id={room_id}, excluding soft-deleted rooms")
+        query = Room.query.filter_by(is_deleted=False)
+        if room_id:
+            query = query.filter_by(room_id=room_id)
+        rooms = query.all()
+        
         current_time = datetime.utcnow()
-        is_current_month = False
-        if target_year and target_month:
-            year = target_year
-            month = target_month
-            # Check if target is current month
-            if year == current_time.year and month == current_time.month:
-                is_current_month = True
-        else:
-            # Default to current month for real-time updates
-            year = current_time.year
-            month = current_time.month
-            is_current_month = True
-
-        query = (
-            db.session.query(
-                Area.area_id,
-                Area.name.label('area_name'),
-                Room.room_id,
-                Room.name.label('room_name'),
-                func.count(Contract.contract_id).label('user_count')
-            )
-            .join(Room, Room.room_id == Contract.room_id)
-            .join(Area, Area.area_id == Room.area_id)
-            .filter(
-                Contract.is_deleted == False,
-                Contract.status == 'ACTIVE',
-                extract('year', Contract.start_date) <= year,
-                extract('year', Contract.end_date) >= year,
-                extract('month', Contract.start_date) <= month,
-                extract('month', Contract.end_date) >= month
-            )
-            .group_by(Area.area_id, Area.name, Room.room_id, Room.name)
-        )
-
-        results = query.all()
-
-        for row in results:
-            existing = UserRoomHistory.query.filter_by(
-                room_id=row.room_id, year=year, month=month
-            ).first()
+        for room in rooms:
+            existing = RoomStatusHistory.query.filter_by(room_id=room.room_id, year=year, month=month).first()
             if existing:
-                if is_current_month:
-                    # Update existing record for current month
-                    existing.user_count = row.user_count
-                    existing.updated_at = current_time
-                    logger.info(f"Updated user room snapshot for room_id={row.room_id}, year={year}, month={month}")
-                else:
-                    logger.warning(f"User room snapshot already exists for room_id={row.room_id}, year={year}, month={month}")
-                    continue
+                existing.status = room.status
+                existing.updated_at = current_time
+                logger.debug(f"Updated RoomStatusHistory for room_id={room.room_id}, year={year}, month={month}, status={room.status}")
             else:
-                # Insert new record
-                history = UserRoomHistory(
-                    area_id=row.area_id,
-                    room_id=row.room_id,
-                    room_name=row.room_name,
+                snapshot = RoomStatusHistory(
+                    area_id=room.area_id,
+                    room_id=room.room_id,
+                    room_name=room.name,
                     year=year,
                     month=month,
-                    user_count=row.user_count,
+                    status=room.status,
                     created_at=current_time,
                     updated_at=current_time
                 )
-                db.session.add(history)
-
-        # Handle empty rooms
-        empty_rooms = (
-            db.session.query(
-                Area.area_id,
-                Area.name.label('area_name'),
-                Room.room_id,
-                Room.name.label('room_name')
-            )
-            .join(Area, Area.area_id == Room.area_id)
-            .filter(
-                Room.is_deleted == False,
-                ~Room.room_id.in_(
-                    db.session.query(Contract.room_id)
-                    .filter(
-                        Contract.is_deleted == False,
-                        Contract.status == 'ACTIVE',
-                        extract('year', Contract.start_date) <= year,
-                        extract('year', Contract.end_date) >= year,
-                        extract('month', Contract.start_date) <= month,
-                        extract('month', Contract.end_date) >= month
-                    )
-                )
-            )
-        ).all()
-
-        for row in empty_rooms:
-            existing = UserRoomHistory.query.filter_by(
-                room_id=row.room_id, year=year, month=month
-            ).first()
-            if existing:
-                if is_current_month:
-                    existing.user_count = 0
-                    existing.updated_at = current_time
-                    logger.info(f"Updated empty user room snapshot for room_id={row.room_id}, year={year}, month={month}")
-                continue
-            else:
-                history = UserRoomHistory(
-                    area_id=row.area_id,
-                    room_id=row.room_id,
-                    room_name=row.room_name,
-                    year=year,
-                    month=month,
-                    user_count=0,
-                    created_at=current_time,
-                    updated_at=current_time
-                )
-                db.session.add(history)
-
+                db.session.add(snapshot)
+                logger.debug(f"Created RoomStatusHistory for room_id={room.room_id}, year={year}, month={month}, status={room.status}")
         db.session.commit()
-        logger.info(f"Saved user room snapshot for {year}-{month}")
+        logger.info(f"Completed room status snapshot for {year}-{month}")
         return True
     except Exception as e:
         db.session.rollback()
-        logger.error(f"Error saving user room snapshot: {str(e)}")
+        logger.error(f"Failed to save room status snapshot for {year}-{month}: {str(e)}")
         return False
 
-def save_room_status_snapshot(target_year=None, target_month=None):
+def save_user_room_snapshot(year, month, room_id=None):
+    """Snapshot user count for non-deleted rooms or a specific non-deleted room, excluding soft-deleted rooms."""
     try:
+        logger.info(f"Starting user room snapshot for {year}-{month}, room_id={room_id}, excluding soft-deleted rooms")
+        query = Room.query.filter_by(is_deleted=False)
+        if room_id:
+            query = query.filter_by(room_id=room_id)
+        rooms = query.all()
         current_time = datetime.utcnow()
-        is_current_month = False
-        if target_year and target_month:
-            year = target_year
-            month = target_month
-            if year == current_time.year and month == current_time.month:
-                is_current_month = True
-        else:
-            year = current_time.year
-            month = current_time.month
-            is_current_month = True
-
-        query = (
-            db.session.query(
-                Area.area_id,
-                Area.name.label('area_name'),
-                Room.room_id,
-                Room.name.label('room_name'),
-                Room.status
-            )
-            .join(Area, Area.area_id == Room.area_id)
-            .filter(Room.is_deleted == False)
-        )
-
-        results = query.all()
-
-        for row in results:
-            existing = RoomStatusHistory.query.filter_by(
-                room_id=row.room_id, year=year, month=month
-            ).first()
+        for room in rooms:
+            existing = UserRoomHistory.query.filter_by(room_id=room.room_id, year=year, month=month).first()
+            user_count = Contract.query.filter_by(room_id=room.room_id, status='ACTIVE', is_deleted=False).count()
             if existing:
-                if is_current_month:
-                    existing.status = row.status
-                    existing.updated_at = current_time
-                    logger.info(f"Updated room status snapshot for room_id={row.room_id}, year={year}, month={month}")
-                else:
-                    logger.warning(f"Room status snapshot already exists for room_id={row.room_id}, year={year}, month={month}")
-                    continue
+                existing.user_count = user_count
+                existing.updated_at = current_time
+                logger.debug(f"Updated UserRoomHistory for room_id={room.room_id}, year={year}, month={month}, user_count={user_count}")
             else:
-                history = RoomStatusHistory(
-                    area_id=row.area_id,
-                    room_id=row.room_id,
-                    room_name=row.room_name,
+                snapshot = UserRoomHistory(
+                    area_id=room.area_id,
+                    room_id=room.room_id,
+                    room_name=room.name,
                     year=year,
                     month=month,
-                    status=row.status,
+                    user_count=user_count,
                     created_at=current_time,
                     updated_at=current_time
                 )
-                db.session.add(history)
-
+                db.session.add(snapshot)
+                logger.debug(f"Created UserRoomHistory for room_id={room.room_id}, year={year}, month={month}, user_count={user_count}")
         db.session.commit()
-        logger.info(f"Saved room status snapshot for {year}-{month}")
+        logger.info(f"Completed user room snapshot for {year}-{month}")
         return True
     except Exception as e:
         db.session.rollback()
-        logger.error(f"Error saving room status snapshot: {str(e)}")
+        logger.error(f"Failed to save user room snapshot for {year}-{month}, room_id={room_id}: {str(e)}")
         return False
 
 @statistics_bp.route('/api/statistics/consumption', methods=['GET'])
@@ -237,14 +128,11 @@ def get_monthly_consumption():
                     User.is_deleted == False
                 )
             )
-
             query = query.filter(Area.area_id == area_id)
-
             if year:
                 query = query.filter(extract('year', BillDetail.bill_month) == year)
             if month:
                 query = query.filter(extract('month', BillDetail.bill_month) == month)
-
             query = query.group_by(
                 Area.area_id,
                 Area.name,
@@ -274,12 +162,10 @@ def get_monthly_consumption():
                     User.is_deleted == False
                 )
             )
-
             if year:
                 query = query.filter(extract('year', BillDetail.bill_month) == year)
             if month:
                 query = query.filter(extract('month', BillDetail.bill_month) == month)
-
             query = query.group_by(
                 Service.service_id,
                 Service.name,
@@ -298,7 +184,6 @@ def get_monthly_consumption():
                 service_unit = row.service_unit
                 month = int(row.month)
                 total_consumption = float(row.total_consumption)
-
                 if area_id not in response:
                     response[area_id] = {
                         'area_id': area_id,
@@ -306,12 +191,9 @@ def get_monthly_consumption():
                         'service_units': {},
                         'months': {}
                     }
-
                 response[area_id]['service_units'][service_name] = service_unit
-
                 if month not in response[area_id]['months']:
                     response[area_id]['months'][month] = {}
-
                 response[area_id]['months'][month][service_name] = total_consumption
         else:
             total_area_id = 0
@@ -326,21 +208,16 @@ def get_monthly_consumption():
                 service_unit = row.service_unit
                 month = int(row.month)
                 total_consumption = float(row.total_consumption)
-
                 response[total_area_id]['service_units'][service_name] = service_unit
-
                 if month not in response[total_area_id]['months']:
                     response[total_area_id]['months'][month] = {}
-
                 response[total_area_id]['months'][month][service_name] = total_consumption
 
         formatted_response = list(response.values())
-
         return jsonify({
             'status': 'success',
             'data': formatted_response
         }), 200
-
     except Exception as e:
         logger.error(f"Error in get_monthly_consumption: {str(e)}")
         return jsonify({
@@ -358,16 +235,13 @@ def get_room_status_stats():
         room_id = request.args.get('room_id', type=int)
 
         if year:
-            # Historical data
             if month:
-                # Specific month
                 query = RoomStatusHistory.query.filter_by(year=year, month=month)
                 if area_id:
                     query = query.filter_by(area_id=area_id)
                 if room_id:
                     query = query.filter_by(room_id=room_id)
                 results = query.all()
-
                 if room_id:
                     response = [row.to_dict() for row in results]
                 else:
@@ -387,7 +261,6 @@ def get_room_status_stats():
                         }
                     response = list(response.values())
             else:
-                # All months of the year
                 query = (
                     db.session.query(
                         Area.area_id,
@@ -404,8 +277,7 @@ def get_room_status_stats():
                     query = query.filter(RoomStatusHistory.area_id == area_id)
                 if room_id:
                     query = query.filter(RoomStatusHistory.room_id == room_id)
-                results = query.all()
-
+                results = query.order_by(RoomStatusHistory.room_id, RoomStatusHistory.month).all()
                 response = {}
                 for row in results:
                     area_id = row.area_id
@@ -415,17 +287,34 @@ def get_room_status_stats():
                             'area_name': row.area_name,
                             'rooms': {}
                         }
-                    response[area_id]['rooms'][row.room_id] = {
-                        'room_name': row.room_name,
-                        'status': row.status,
-                        'month': row.month
-                    }
-                response = list(response.values())
+                    if row.room_id not in response[area_id]['rooms']:
+                        response[area_id]['rooms'][row.room_id] = {
+                            'room_name': row.room_name,
+                            'monthly_status': {m: None for m in range(1, 13)}
+                        }
+                    response[area_id]['rooms'][row.room_id]['monthly_status'][row.month] = row.status
+                formatted_response = []
+                for area_data in response.values():
+                    area_rooms = []
+                    for room_id, room_data in area_data['rooms'].items():
+                        monthly_status = [
+                            {'month': m, 'status': row_data['monthly_status'][m]}
+                            for m in range(1, 13)
+                        ]
+                        area_rooms.append({
+                            'room_id': room_id,
+                            'room_name': room_data['room_name'],
+                            'monthly_status': monthly_status
+                        })
+                    formatted_response.append({
+                        'area_id': area_data['area_id'],
+                        'area_name': area_data['area_name'],
+                        'rooms': area_rooms
+                    })
+                response = formatted_response
         else:
-            # Real-time data
-            current_time = datetime.utcnow()
+            current_time = pendulum.now('Asia/Ho_Chi_Minh')
             query_month = month if month else current_time.month
-
             query = (
                 db.session.query(
                     Area.area_id,
@@ -443,7 +332,6 @@ def get_room_status_stats():
             if room_id:
                 query = query.filter(Room.room_id == room_id)
             results = query.all()
-
             if room_id:
                 response = [
                     {
@@ -471,12 +359,10 @@ def get_room_status_stats():
                         'month': row.month
                     }
                 response = list(response.values())
-
         return jsonify({
             'status': 'success',
             'data': response
         }), 200
-
     except Exception as e:
         logger.error(f"Error in get_room_status_stats: {str(e)}")
         return jsonify({
@@ -492,7 +378,6 @@ def get_room_capacity_stats():
         month = request.args.get('month', type=int)
         quarter = request.args.get('quarter', type=int)
         area_id = request.args.get('area_id', type=int)
-
         query = (
             db.session.query(
                 Area.area_id,
@@ -503,16 +388,14 @@ def get_room_capacity_stats():
             .join(Area, Area.area_id == Room.area_id)
             .join(Contract, Contract.room_id == Room.room_id, isouter=True)
             .filter(
-                Room.is_deleted == False,
                 Room.status == 'OCCUPIED',
+                Room.is_deleted == False,
                 Contract.is_deleted == False,
                 Contract.status == 'ACTIVE'
             )
         )
-
         if area_id:
             query = query.filter(Area.area_id == area_id)
-
         if year:
             query = query.filter(extract('year', Contract.start_date) <= year, extract('year', Contract.end_date) >= year)
         if month:
@@ -521,34 +404,26 @@ def get_room_capacity_stats():
             query = query.filter(
                 (extract('month', Contract.start_date) <= (quarter * 3), extract('month', Contract.end_date) >= ((quarter - 1) * 3 + 1))
             )
-
         query = query.group_by(Area.area_id, Area.name, Room.capacity)
-
         results = query.all()
-
         response = {}
         for row in results:
             area_id = row.area_id
             area_name = row.area_name
             capacity = row.capacity
             room_count = row.room_count
-
             if area_id not in response:
                 response[area_id] = {
                     'area_id': area_id,
                     'area_name': area_name,
                     'capacity_counts': {}
                 }
-
             response[area_id]['capacity_counts'][str(capacity)] = room_count
-
         formatted_response = list(response.values())
-
         return jsonify({
             'status': 'success',
             'data': formatted_response
         }), 200
-
     except Exception as e:
         logger.error(f"Error in get_room_capacity_stats: {str(e)}")
         return jsonify({
@@ -564,7 +439,6 @@ def get_contract_stats():
         month = request.args.get('month', type=int)
         quarter = request.args.get('quarter', type=int)
         area_id = request.args.get('area_id', type=int)
-
         query = (
             db.session.query(
                 Area.area_id,
@@ -575,15 +449,13 @@ def get_contract_stats():
             .join(Room, Room.room_id == Contract.room_id)
             .join(Area, Area.area_id == Room.area_id)
             .filter(
+                Room.is_deleted == False,
                 Contract.is_deleted == False,
-                Contract.status == 'ACTIVE',
-                Room.is_deleted == False
+                Contract.status == 'ACTIVE'
             )
         )
-
         if area_id:
             query = query.filter(Area.area_id == area_id)
-
         if year:
             query = query.filter(extract('year', Contract.start_date) <= year, extract('year', Contract.end_date) >= year)
         if month:
@@ -592,35 +464,27 @@ def get_contract_stats():
             query = query.filter(
                 (extract('month', Contract.start_date) <= (quarter * 3), extract('month', Contract.end_date) >= ((quarter - 1) * 3 + 1))
             )
-
         query = query.group_by(Area.area_id, Area.name, extract('month', Contract.start_date))
-
         results = query.all()
-
         response = {}
         for row in results:
             area_id = row.area_id
             area_name = row.area_name
             month = int(row.month) if row.month else None
             contract_count = row.contract_count
-
             if area_id not in response:
                 response[area_id] = {
                     'area_id': area_id,
                     'area_name': area_name,
                     'months': {}
                 }
-
             if month:
                 response[area_id]['months'][month] = contract_count
-
         formatted_response = list(response.values())
-
         return jsonify({
             'status': 'success',
             'data': formatted_response
         }), 200
-
     except Exception as e:
         logger.error(f"Error in get_contract_stats: {str(e)}")
         return jsonify({
@@ -642,7 +506,11 @@ def get_user_stats():
             .outerjoin(Contract, Contract.user_id == User.user_id)
             .outerjoin(Room, Room.room_id == Contract.room_id)
             .outerjoin(Area, Area.area_id == Room.area_id)
-            .filter(User.is_deleted == False)
+            .filter(
+                User.is_deleted == False,
+                Room.is_deleted == False,
+                Contract.is_deleted == False
+            )
         )
         if area_id:
             query = query.filter(Area.area_id == area_id)
@@ -668,18 +536,14 @@ def get_user_monthly_stats():
         month = request.args.get('month', type=int)
         area_id = request.args.get('area_id', type=int)
         room_id = request.args.get('room_id', type=int)
-
         if year:
-            # Historical data
             if month:
-                # Specific month
                 query = UserRoomHistory.query.filter_by(year=year, month=month)
                 if area_id:
                     query = query.filter_by(area_id=area_id)
                 if room_id:
                     query = query.filter_by(room_id=room_id)
                 results = query.all()
-
                 if room_id:
                     response = [row.to_dict() for row in results]
                 else:
@@ -697,7 +561,6 @@ def get_user_monthly_stats():
                         response[area_id]['total_users'] += row.user_count
                     response = list(response.values())
             else:
-                # All months of the year
                 query = (
                     db.session.query(
                         Area.area_id,
@@ -714,7 +577,6 @@ def get_user_monthly_stats():
                     query = query.filter(UserRoomHistory.room_id == room_id)
                 query = query.group_by(Area.area_id, Area.name, UserRoomHistory.month)
                 results = query.all()
-
                 response = {}
                 for row in results:
                     area_id = row.area_id
@@ -728,18 +590,14 @@ def get_user_monthly_stats():
                     response[area_id]['months'][row.month] = row.total_users
                     response[area_id]['total_users'] += row.total_users
                 response = list(response.values())
-
-                # Fill missing months with zero
                 for area_data in response:
                     for m in range(1, 13):
                         if m not in area_data['months']:
                             area_data['months'][m] = 0
         else:
-            # Real-time data for current year/month
-            current_time = datetime.utcnow()
+            current_time = pendulum.now('Asia/Ho_Chi_Minh')
             query_year = current_time.year
             query_month = month if month else current_time.month
-
             query = (
                 db.session.query(
                     Area.area_id,
@@ -759,41 +617,33 @@ def get_user_monthly_stats():
                     extract('month', Contract.end_date) >= query_month
                 ))
                 .filter(Room.is_deleted == False)
-                .group_by(Area.area_id, Area.name)
             )
-
             if area_id:
                 query = query.filter(Area.area_id == area_id)
             if room_id:
                 query = query.filter(Room.room_id == room_id)
-
             results = query.all()
-
             response = {}
             for row in results:
-                area_id = row[0]  # area_id
+                area_id = row[0]
                 if area_id not in response:
                     response[area_id] = {
                         'area_id': area_id,
-                        'area_name': row[1],  # area_name
+                        'area_name': row[1],
                         'months': {},
                         'total_users': 0
                     }
-                response[area_id]['months'][int(row[3])] = row[2]  # month, user_count
-                response[area_id]['total_users'] += row[2]  # user_count
+                response[area_id]['months'][int(row[3])] = row[2]
+                response[area_id]['total_users'] += row[2]
             response = list(response.values())
-
-            # Fill missing months with zero
             for area_data in response:
                 for m in range(1, 13):
                     if m not in area_data['months']:
                         area_data['months'][m] = 0
-
         return jsonify({
             'status': 'success',
             'data': response
         }), 200
-
     except Exception as e:
         logger.error(f"Error in get_user_monthly_stats: {str(e)}")
         return jsonify({
@@ -806,7 +656,6 @@ def get_user_monthly_stats():
 def get_occupancy_rate_stats():
     try:
         area_id = request.args.get('area_id', type=int)
-
         query = (
             db.session.query(
                 Area.area_id,
@@ -817,14 +666,10 @@ def get_occupancy_rate_stats():
             .join(Area, Area.area_id == Room.area_id)
             .filter(Room.is_deleted == False)
         )
-
         if area_id:
             query = query.filter(Area.area_id == area_id)
-
         query = query.group_by(Area.area_id, Area.name)
-
         results = query.all()
-
         response = []
         for row in results:
             total_rooms = row.total_rooms
@@ -837,12 +682,10 @@ def get_occupancy_rate_stats():
                 'occupied_rooms': occupied_rooms,
                 'occupancy_rate': round(occupancy_rate, 2)
             })
-
         return jsonify({
             'status': 'success',
             'data': response
         }), 200
-
     except Exception as e:
         logger.error(f"Error in get_occupancy_rate_stats: {str(e)}")
         return jsonify({
@@ -857,7 +700,6 @@ def get_report_stats():
         year = request.args.get('year', type=int)
         month = request.args.get('month', type=int)
         area_id = request.args.get('area_id', type=int)
-
         query = (
             db.session.query(
                 Area.area_id,
@@ -876,15 +718,12 @@ def get_report_stats():
                 Report.created_at.isnot(None)
             )
         )
-
         if area_id:
             query = query.filter(Area.area_id == area_id)
-
         if year:
             query = query.filter(extract('year', Report.created_at) == year)
         if month:
             query = query.filter(extract('month', Report.created_at) == month)
-
         query = query.group_by(
             Area.area_id,
             Area.name,
@@ -893,9 +732,7 @@ def get_report_stats():
             extract('month', Report.created_at),
             extract('year', Report.created_at)
         )
-
         results = query.all()
-
         response = {}
         for row in results:
             area_id = row.area_id
@@ -905,7 +742,6 @@ def get_report_stats():
             report_count = row.report_count
             month = int(row.month) if row.month else None
             year = int(row.year) if row.year else None
-
             if area_id not in response:
                 response[area_id] = {
                     'area_id': area_id,
@@ -913,25 +749,18 @@ def get_report_stats():
                     'years': {},
                     'report_types': {}
                 }
-
             response[area_id]['report_types'][str(report_type_id)] = report_type_name
-
             if year not in response[area_id]['years']:
                 response[area_id]['years'][year] = {'total': 0, 'months': {}, 'types': {}}
-
             response[area_id]['years'][year]['total'] += report_count
-
             if month:
                 if month not in response[area_id]['years'][year]['months']:
                     response[area_id]['years'][year]['months'][month] = {}
                 response[area_id]['years'][year]['months'][month][report_type_name] = report_count
-
             if report_type_name not in response[area_id]['years'][year]['types']:
                 response[area_id]['years'][year]['types'][report_type_name] = 0
             response[area_id]['years'][year]['types'][report_type_name] += report_count
-
         formatted_response = list(response.values())
-
         trend_stats = []
         for area_data in formatted_response:
             area_id = area_data['area_id']
@@ -945,6 +774,7 @@ def get_report_stats():
                     .join(Area, Area.area_id == Room.area_id)
                     .filter(
                         Area.area_id == area_id,
+                        Room.is_deleted == False,
                         Contract.is_deleted == False,
                         Contract.status == 'ACTIVE',
                         extract('year', Contract.start_date) <= year,
@@ -953,9 +783,7 @@ def get_report_stats():
                 )
                 contract_result = contract_query.one()
                 contract_count = contract_result.contract_count
-
                 report_per_contract = (year_data['total'] / contract_count) if contract_count > 0 else 0
-
                 trend_stats.append({
                     'area_id': area_id,
                     'area_name': area_name,
@@ -964,13 +792,11 @@ def get_report_stats():
                     'total_contracts': contract_count,
                     'report_per_contract': round(report_per_contract, 2)
                 })
-
         return jsonify({
             'status': 'success',
             'data': formatted_response,
             'trends': trend_stats
         }), 200
-
     except Exception as e:
         logger.error(f"Error in get_report_stats: {str(e)}")
         return jsonify({
@@ -978,26 +804,171 @@ def get_report_stats():
             'message': str(e)
         }), 500
 
-@statistics_bp.route('/admin/save-snapshots', methods=['POST'], endpoint='statistics_save_snapshots')
+@statistics_bp.route('/admin/save-snapshots', methods=['POST'])
 @admin_required()
 def save_snapshots():
     try:
         year = request.json.get('year', type=int)
         month = request.json.get('month', type=int)
-        if year and month:
-            if not (1 <= month <= 12):
-                return jsonify({'status': 'error', 'message': 'Invalid month'}), 400
-            if year < 2000 or year > datetime.utcnow().year:
-                return jsonify({'status': 'error', 'message': 'Invalid year'}), 400
-        save_room_status_snapshot(year=year, month=month)
-        save_user_room_snapshot(year=year, month=month)
-        return jsonify({
-            'status': 'success',
-            'message': f'Lưu snapshot thành công cho {year or "current year"}-{month or "previous month"}'
-        }), 200
+        current_time = pendulum.now('Asia/Ho_Chi_Minh')
+        year = year or current_time.year
+        month = month or current_time.month
+        if not (1 <= month <= 12):
+            return jsonify({'status': 'error', 'message': 'Invalid month'}), 400
+        if year < 2000 or year > current_time.year:
+            return jsonify({'status': 'error', 'message': 'Invalid year'}), 400
+        success_room = snapshot_room_status(year=year, month=month)
+        success_user = save_user_room_snapshot(year=year, month=month)
+        if success_room and success_user:
+            return jsonify({
+                'status': 'success',
+                'message': f'Lưu snapshot thành công cho {year}-{month}'
+            }), 200
+        else:
+            return jsonify({
+                'status': 'error',
+                'message': f'Lưu snapshot thất bại cho {year}-{month}'
+            }), 500
     except Exception as e:
         logger.error(f"Error saving snapshots: {str(e)}")
         return jsonify({
             'status': 'error',
             'message': f'Lỗi khi lưu snapshot: {str(e)}'
+        }), 500
+
+@statistics_bp.route('/api/statistics/rooms/status/summary', methods=['GET'])
+@admin_required()
+def get_room_status_summary():
+    try:
+        year = request.args.get('year', type=int)
+        area_id = request.args.get('area_id', type=int)
+        
+        if not year:
+            return jsonify({
+                'status': 'error',
+                'message': 'Year is required'
+            }), 400
+
+        logger.info(f"Fetching room status summary for year={year}, area_id={area_id}")
+
+        query = (
+            db.session.query(
+                RoomStatusHistory.month,
+                RoomStatusHistory.status,
+                func.count().label('count')
+            )
+            .filter(RoomStatusHistory.year == year)
+            .group_by(RoomStatusHistory.month, RoomStatusHistory.status)
+        )
+
+        if area_id:
+            query = query.filter(RoomStatusHistory.area_id == area_id)
+
+        results = query.order_by(RoomStatusHistory.month).all()
+
+        response = []
+        for month in range(1, 13):
+            month_data = {
+                'month': month,
+                'statuses': {}
+            }
+            month_results = [r for r in results if r.month == month]
+            for result in month_results:
+                month_data['statuses'][result.status] = result.count
+            for status in ['AVAILABLE', 'OCCUPIED', 'MAINTENANCE', 'DISABLED']:
+                if status not in month_data['statuses']:
+                    month_data['statuses'][status] = 0
+            response.append(month_data)
+
+        return jsonify({
+            'status': 'success',
+            'data': response
+        }), 200
+    except Exception as e:
+        logger.error(f"Error in get_room_status_summary: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': f'Error processing data: {str(e)}'
+        }), 500
+
+@statistics_bp.route('/api/statistics/users/summary', methods=['GET'])
+@admin_required()
+def get_user_summary():
+    try:
+        year = request.args.get('year', type=int)
+        area_id = request.args.get('area_id', type=int)
+        
+        if not year:
+            return jsonify({
+                'status': 'error',
+                'message': 'Year is required'
+            }), 400
+
+        logger.info(f"Fetching user summary for year={year}, area_id={area_id}")
+
+        query = (
+            db.session.query(
+                UserRoomHistory.month,
+                func.sum(UserRoomHistory.user_count).label('total_users')
+            )
+            .filter(UserRoomHistory.year == year)
+            .group_by(UserRoomHistory.month)
+        )
+
+        if area_id:
+            query = query.filter(UserRoomHistory.area_id == area_id)
+
+        results = query.order_by(UserRoomHistory.month).all()
+
+        response = []
+        for month in range(1, 13):
+            month_data = {
+                'month': month,
+                'total_users': 0
+            }
+            month_result = next((r for r in results if r.month == month), None)
+            if month_result:
+                month_data['total_users'] = month_result.total_users
+            response.append(month_data)
+
+        return jsonify({
+            'status': 'success',
+            'data': response
+        }), 200
+    except Exception as e:
+        logger.error(f"Error in get_user_summary: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': f'Error processing data: {str(e)}'
+        }), 500
+    
+@statistics_bp.route('/api/statistics/snapshot', methods=['POST'])
+@admin_required()
+def manual_snapshot():
+    """Manually trigger snapshots for room status and user counts for all non-deleted rooms using current time."""
+    try:
+        current_time = pendulum.now('Asia/Ho_Chi_Minh')
+        year = current_time.year
+        month = current_time.month
+        
+        logger.info(f"Manual snapshot triggered for all non-deleted rooms, {year}-{month}")
+        
+        success_room = snapshot_room_status(year=year, month=month)
+        success_user = save_user_room_snapshot(year=year, month=month)
+        
+        if success_room and success_user:
+            return jsonify({
+                'status': 'success',
+                'message': f'Manually triggered snapshots successfully for all non-deleted rooms, {year}-{month}'
+            }), 200
+        else:
+            return jsonify({
+                'status': 'error',
+                'message': f'Failed to trigger snapshots for all non-deleted rooms, {year}-{month}'
+            }), 500
+    except Exception as e:
+        logger.error(f"Error in manual_snapshot for all non-deleted rooms, {year}-{month}: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': f'Error triggering snapshots: {str(e)}'
         }), 500
