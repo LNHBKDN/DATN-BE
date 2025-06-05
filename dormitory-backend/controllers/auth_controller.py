@@ -1,5 +1,5 @@
 from flask import Blueprint, request, jsonify, current_app, render_template
-from flask_jwt_extended import verify_jwt_in_request,create_access_token, create_refresh_token, jwt_required, get_jwt_identity, get_jwt, set_refresh_cookies, unset_jwt_cookies, decode_token
+from flask_jwt_extended import verify_jwt_in_request, create_access_token, create_refresh_token, jwt_required, get_jwt_identity, get_jwt, set_refresh_cookies, unset_jwt_cookies, decode_token
 from werkzeug.security import check_password_hash, generate_password_hash
 from models.user import User
 from models.admin import Admin
@@ -7,7 +7,7 @@ from models.contract import Contract
 from models.token_blacklist import TokenBlacklist
 from models.refresh_tokens import RefreshToken  
 from extensions import db, mail
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import secrets
 from functools import wraps
 from flask_mail import Message
@@ -15,13 +15,11 @@ import re
 import logging
 import time
 
-# Thiết lập logger
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 auth_bp = Blueprint('auth', __name__)
 
-# Hàm kiểm tra độ mạnh của mật khẩu
 def is_strong_password(password):
     """Check if the password meets strength requirements."""
     if not isinstance(password, str):
@@ -42,8 +40,18 @@ def authenticate_admin(username, password):
     """Authenticate an Admin using username."""
     admin = Admin.query.filter_by(username=username).first()
     if admin and check_password_hash(admin.password_hash, password):
-        access_token = create_access_token(identity=str(admin.admin_id), additional_claims={'type': 'ADMIN'})
-        refresh_token = create_refresh_token(identity=str(admin.admin_id), additional_claims={'type': 'ADMIN'})
+        now = datetime.now(timezone.utc)
+        access_token = create_access_token(
+            identity=str(admin.admin_id),
+            additional_claims={'type': 'ADMIN'},
+            fresh=False,
+            expires_delta=current_app.config['JWT_ACCESS_TOKEN_EXPIRES']
+        )
+        refresh_token = create_refresh_token(
+            identity=str(admin.admin_id),
+            additional_claims={'type': 'ADMIN'},
+            expires_delta=current_app.config['JWT_REFRESH_TOKEN_EXPIRES']
+        )
         return {
             'access_token': access_token,
             'id': admin.admin_id,
@@ -56,8 +64,18 @@ def authenticate_user(email, password):
     """Authenticate a User using email."""
     user = User.query.filter_by(email=email).first()
     if user and check_password_hash(user.password_hash, password):
-        access_token = create_access_token(identity=str(user.user_id), additional_claims={'type': 'USER'})
-        refresh_token = create_refresh_token(identity=str(user.user_id), additional_claims={'type': 'USER'})
+        now = datetime.now(timezone.utc)
+        access_token = create_access_token(
+            identity=str(user.user_id),
+            additional_claims={'type': 'USER'},
+            fresh=False,
+            expires_delta=current_app.config['JWT_ACCESS_TOKEN_EXPIRES']
+        )
+        refresh_token = create_refresh_token(
+            identity=str(user.user_id),
+            additional_claims={'type': 'USER'},
+            expires_delta=current_app.config['JWT_REFRESH_TOKEN_EXPIRES']
+        )
         return {
             'access_token': access_token,
             'id': user.user_id,
@@ -66,7 +84,6 @@ def authenticate_user(email, password):
         }, 200
     return None
 
-# Hàm retry cho các thao tác database
 def execute_with_retry(operation, max_retries=3, delay=1):
     """Execute a database operation with retry logic."""
     for attempt in range(max_retries):
@@ -75,8 +92,8 @@ def execute_with_retry(operation, max_retries=3, delay=1):
         except Exception as e:
             if "Lost connection to MySQL server" in str(e) and attempt < max_retries - 1:
                 logger.warning("Connection lost, retrying (%d/%d): %s", attempt + 1, max_retries, str(e))
-                time.sleep(delay * (2 ** attempt))  # Exponential backoff
-                db.session.rollback()  # Rollback the session to clear stale state
+                time.sleep(delay * (2 ** attempt))
+                db.session.rollback()
                 continue
             raise e
 
@@ -90,6 +107,7 @@ def admin_login():
 
         username = data.get('username')
         password = data.get('password')
+        remember_me = data.get('remember_me', False)
         
         if not username or not password:
             return jsonify({'message': 'Thiếu username hoặc mật khẩu'}), 400
@@ -97,33 +115,35 @@ def admin_login():
         result = authenticate_admin(username, password)
         if result:
             access_token = result[0]['access_token']
-            refresh_token = result[0]['refresh_token']
+            refresh_token = result[0]['refresh_token'] if remember_me else None
             admin_id = result[0]['id']
             
-            # Decode the refresh token to extract the jti
-            refresh_token_decoded = decode_token(refresh_token)
-            refresh_jti = refresh_token_decoded['jti']
-            expires_at = datetime.utcnow() + current_app.config['JWT_REFRESH_TOKEN_EXPIRES']
-            refresh_token_entry = RefreshToken(
-                jti=refresh_jti,
-                admin_id=admin_id,
-                type='ADMIN',
-                expires_at=expires_at,
-                created_at=datetime.utcnow()
-            )
-            db.session.add(refresh_token_entry)
-            execute_with_retry(lambda: db.session.commit())
+            if remember_me:
+                refresh_token_decoded = decode_token(refresh_token)
+                refresh_jti = refresh_token_decoded['jti']
+                expires_at = datetime.now(timezone.utc) + current_app.config['JWT_REFRESH_TOKEN_EXPIRES']
+                refresh_token_entry = RefreshToken(
+                    jti=refresh_jti,
+                    admin_id=admin_id,
+                    type='ADMIN',
+                    expires_at=expires_at,
+                    created_at=datetime.now(timezone.utc)
+                )
+                db.session.add(refresh_token_entry)
+                execute_with_retry(lambda: db.session.commit())
 
             logger.info("Admin login successful: admin_id %s", admin_id)
             
-            # Set refresh token in an HTTP-only cookie and include in response body
             response = jsonify({
                 'access_token': access_token,
-                'refresh_token': refresh_token,  # Added to response body
+                'refresh_token': refresh_token,
                 'id': admin_id,
                 'type': 'ADMIN'
             })
-            set_refresh_cookies(response, refresh_token)
+            if remember_me:
+                set_refresh_cookies(response, refresh_token)
+            else:
+                unset_jwt_cookies(response)
             return response, result[1]
         
         logger.warning("Admin login failed: invalid credentials for username %s", username)
@@ -146,29 +166,26 @@ def user_login():
 
         email = data.get('email')
         password = data.get('password')
+        remember_me = data.get('remember_me', False)
         
         if not email:
             return jsonify({'message': 'Yêu cầu nhập email'}), 400
         if not password:
             return jsonify({'message': 'Yêu cầu nhập mật khẩu'}), 400
 
-        # Kiểm tra định dạng email
-        email_regex = r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$'
+        email_regex = r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA.Z0-9-.]+$'
         if not re.match(email_regex, email):
             return jsonify({'message': 'Định dạng email không hợp lệ'}), 400
         
-        # Tìm người dùng với email và chưa bị xóa
         user = User.query.filter_by(email=email, is_deleted=False).first()
         if not user:
             logger.warning("User login failed: email %s not found or deleted", email)
             return jsonify({'message': 'Invalid email'}), 401
         
-        # Kiểm tra mật khẩu
         if not check_password_hash(user.password_hash, password):
             logger.warning("User login failed: invalid password for email %s", email)
             return jsonify({'message': 'Invalid password'}), 401
 
-        # Kiểm tra xem người dùng có hợp đồng không
         contract = Contract.query.filter_by(
             user_id=user.user_id,
             is_deleted=False
@@ -176,35 +193,49 @@ def user_login():
         if not contract:
             logger.warning("User login failed: user %s has no contract", user.email)
             return jsonify({'message': 'Bạn chưa tạo hợp đồng, chưa thể đăng nhập vào ứng dụng'}), 403
-
-        # Tạo token và cho phép đăng nhập
-        access_token = create_access_token(identity=str(user.user_id), additional_claims={'type': 'USER'})
-        refresh_token = create_refresh_token(identity=str(user.user_id), additional_claims={'type': 'USER'})
         
-        # Decode the refresh token to extract the jti
-        refresh_token_decoded = decode_token(refresh_token)
-        refresh_jti = refresh_token_decoded['jti']
-        expires_at = datetime.utcnow() + current_app.config['JWT_REFRESH_TOKEN_EXPIRES']
-        refresh_token_entry = RefreshToken(
-            jti=refresh_jti,
-            user_id=user.user_id,
-            type='USER',
-            expires_at=expires_at,
-            created_at=datetime.utcnow()
+        if contract.calculated_status != 'ACTIVE':
+            logger.warning("User login failed: contract for user %s is not active, status: %s", user.email, contract.calculated_status)
+            return jsonify({'message': 'Hợp đồng của bạn chưa ở trạng thái ACTIVE, không thể đăng nhập'}), 403
+
+        access_token = create_access_token(
+            identity=str(user.user_id),
+            additional_claims={'type': 'USER'},
+            fresh=False,
+            expires_delta=current_app.config['JWT_ACCESS_TOKEN_EXPIRES']
         )
-        db.session.add(refresh_token_entry)
-        execute_with_retry(lambda: db.session.commit())
+        refresh_token = create_refresh_token(
+            identity=str(user.user_id),
+            additional_claims={'type': 'USER'},
+            expires_delta=current_app.config['JWT_REFRESH_TOKEN_EXPIRES']
+        ) if remember_me else None
+        
+        if remember_me:
+            refresh_token_decoded = decode_token(refresh_token)
+            refresh_jti = refresh_token_decoded['jti']
+            expires_at = datetime.now(timezone.utc) + current_app.config['JWT_REFRESH_TOKEN_EXPIRES']
+            refresh_token_entry = RefreshToken(
+                jti=refresh_jti,
+                user_id=user.user_id,
+                type='USER',
+                expires_at=expires_at,
+                created_at=datetime.now(timezone.utc)
+            )
+            db.session.add(refresh_token_entry)
+            execute_with_retry(lambda: db.session.commit())
 
         logger.info("User login successful: user_id %s", user.user_id)
         
-        # Set refresh token in an HTTP-only cookie and include in response body
         response = jsonify({
             'access_token': access_token,
-            'refresh_token': refresh_token,  # Added to response body
+            'refresh_token': refresh_token,
             'id': user.user_id,
             'type': 'USER'
         })
-        set_refresh_cookies(response, refresh_token)
+        if remember_me:
+            set_refresh_cookies(response, refresh_token)
+        else:
+            unset_jwt_cookies(response)
         return response, 200
 
     except ValueError as ve:
@@ -224,48 +255,54 @@ def refresh():
         user_id = get_jwt_identity()
         user_type = claims['type']
 
-        # Check if the refresh token is valid and not revoked
         refresh_token = RefreshToken.query.filter_by(jti=jti, type=user_type).first()
         if not refresh_token:
             return jsonify({'message': 'Refresh token không hợp lệ'}), 401
         if refresh_token.revoked_at:
             return jsonify({'message': 'Refresh token đã bị thu hồi'}), 401
-        if refresh_token.expires_at < datetime.utcnow():
+        if refresh_token.expires_at < datetime.now(timezone.utc):
             return jsonify({'message': 'Refresh token đã hết hạn'}), 401
 
-        # Verify the user/admin still exists
         if user_type == 'USER':
             user = User.query.filter_by(user_id=user_id, is_deleted=False).first()
             if not user:
                 return jsonify({'message': 'Người dùng không tồn tại hoặc đã bị xóa'}), 404
-        else:  # ADMIN
+        else:
             admin = Admin.query.get(user_id)
             if not admin:
                 return jsonify({'message': 'Quản trị viên không tồn tại'}), 404
 
-        # Create a new access token
-        new_access_token = create_access_token(identity=user_id, additional_claims={'type': user_type})
+        new_access_token = create_access_token(
+            identity=user_id,
+            additional_claims={'type': user_type},
+            fresh=False,
+            expires_delta=current_app.config['JWT_ACCESS_TOKEN_EXPIRES']
+        )
 
-        # Optionally, rotate the refresh token (issue a new one and revoke the old one)
-        refresh_token.revoked_at = datetime.utcnow()
-        new_refresh_token = create_refresh_token(identity=user_id, additional_claims={'type': user_type})
+        refresh_token.revoked_at = datetime.now(timezone.utc)
+        new_refresh_token = create_refresh_token(
+            identity=user_id,
+            additional_claims={'type': user_type},
+            expires_delta=current_app.config['JWT_REFRESH_TOKEN_EXPIRES']
+        )
         new_refresh_jti = get_jwt()['jti']
-        new_expires_at = datetime.utcnow() + current_app.config['JWT_REFRESH_TOKEN_EXPIRES']
+        new_expires_at = datetime.now(timezone.utc) + current_app.config['JWT_REFRESH_TOKEN_EXPIRES']
         new_refresh_token_entry = RefreshToken(
             jti=new_refresh_jti,
             user_id=user_id if user_type == 'USER' else None,
             admin_id=user_id if user_type == 'ADMIN' else None,
             type=user_type,
-            expires_at=new_expires_at
+            expires_at=new_expires_at,
+            created_at=datetime.now(timezone.utc)
         )
         db.session.add(new_refresh_token_entry)
         execute_with_retry(lambda: db.session.commit())
 
         logger.info("Token refreshed successfully for %s_id %s", user_type.lower(), user_id)
         
-        # Set the new refresh token in an HTTP-only cookie
         response = jsonify({
-            'access_token': new_access_token
+            'access_token': new_access_token,
+            'refresh_token': new_refresh_token
         })
         set_refresh_cookies(response, new_refresh_token)
         return response, 200
@@ -278,37 +315,33 @@ def refresh():
         return jsonify({'message': 'Lỗi server', 'error': str(e)}), 500
 
 @auth_bp.route('/auth/logout', methods=['POST'])
-@jwt_required(optional=True)  # Make token verification optional
+@jwt_required(optional=True)
 def logout():
     """Log out a user or admin by adding tokens to the blacklist."""
     try:
-        # Verify the JWT token if present
         verify_jwt_in_request(optional=True)
         access_jti = None
         refresh_jti = None
 
-        # Blacklist the access token if present
         jwt_data = get_jwt()
         if jwt_data:
             access_jti = jwt_data['jti']
-            access_expires_at = datetime.utcnow() + current_app.config['JWT_ACCESS_TOKEN_EXPIRES']
+            access_expires_at = datetime.now(timezone.utc) + current_app.config['JWT_ACCESS_TOKEN_EXPIRES']
             access_token = TokenBlacklist(jti=access_jti, expires_at=access_expires_at)
             db.session.add(access_token)
 
-        # Blacklist the refresh token (if provided)
         refresh_token = request.cookies.get('refresh_token')
         if refresh_token:
             refresh_token_decoded = decode_token(refresh_token)
             refresh_jti = refresh_token_decoded['jti']
             refresh_token_entry = RefreshToken.query.filter_by(jti=refresh_jti).first()
             if refresh_token_entry and not refresh_token_entry.revoked_at:
-                refresh_token_entry.revoked_at = datetime.utcnow()
+                refresh_token_entry.revoked_at = datetime.now(timezone.utc)
         
         execute_with_retry(lambda: db.session.commit())
 
         logger.info("Token blacklisted successfully: access_jti %s, refresh_jti %s", access_jti or "none", refresh_jti or "none")
         
-        # Unset JWT cookies
         response = jsonify({'message': 'Đăng xuất thành công'})
         unset_jwt_cookies(response)
         return response, 200
@@ -332,7 +365,7 @@ def forgot_password():
         if not email:
             return jsonify({'message': 'Yêu cầu nhập email'}), 400
 
-        email_regex = r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$'
+        email_regex = r'^[a-zA-Z0-9_.+-]+@[a-zA.Z0-9-]+\.[a-zA.Z0-9-.]+$'
         if not re.match(email_regex, email):
             return jsonify({'message': 'Định dạng email không hợp lệ'}), 400
 
@@ -345,14 +378,13 @@ def forgot_password():
             return jsonify({'message': 'Không tìm thấy tài khoản với email này'}), 404
 
         reset_code = ''.join([str(secrets.randbelow(10)) for _ in range(6)])
-        expiry = datetime.utcnow() + timedelta(minutes=30)
+        expiry = datetime.now(timezone.utc) + timedelta(minutes=30)
         hashed_code = generate_password_hash(reset_code, method='pbkdf2:sha256')
 
         user_or_admin.reset_token = hashed_code
         user_or_admin.reset_token_expiry = expiry
         user_or_admin.reset_attempts = 0
 
-        # Use retry logic for database commit
         execute_with_retry(lambda: db.session.commit())
 
         sender = current_app.config.get('MAIL_DEFAULT_SENDER')
@@ -405,7 +437,7 @@ def reset_password():
         if not email or not new_password or not code:
             return jsonify({'message': 'Yêu cầu nhập email, mật khẩu mới và mã xác nhận'}), 400
 
-        email_regex = r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$'
+        email_regex = r'^[a-zA.Z0-9_.+-]+@[a-zA.Z0-9-]+\.[a-zA.Z0-9-.]+$'
         if not re.match(email_regex, email):
             return jsonify({'message': 'Định dạng email không hợp lệ'}), 400
 
@@ -418,7 +450,7 @@ def reset_password():
 
         admin = Admin.query.filter_by(email=email).first()
         if admin and admin.reset_token:
-            if not admin.reset_token_expiry or admin.reset_token_expiry < datetime.utcnow():
+            if not admin.reset_token_expiry or admin.reset_token_expiry < datetime.now(timezone.utc):
                 admin.reset_attempts = 0
                 admin.reset_token = None
                 admin.reset_token_expiry = None
@@ -437,10 +469,9 @@ def reset_password():
                 logger.warning("Admin %s nhập sai mã xác nhận, lần thử %s", admin.admin_id, admin.reset_attempts)
                 return jsonify({'message': f'Mã xác nhận không chính xác. Bạn còn {3 - admin.reset_attempts} lần thử.'}), 400
             
-            # Revoke all refresh tokens for this admin
             refresh_tokens = RefreshToken.query.filter_by(admin_id=admin.admin_id, type='ADMIN', revoked_at=None).all()
             for token in refresh_tokens:
-                token.revoked_at = datetime.utcnow()
+                token.revoked_at = datetime.now(timezone.utc)
 
             admin.password_hash = generate_password_hash(new_password)
             admin.reset_token = None
@@ -449,8 +480,7 @@ def reset_password():
             execute_with_retry(lambda: db.session.commit())
             logger.info("Mật khẩu admin %s đã được đặt lại", admin.admin_id)
 
-            # Gửi email thông báo đặt lại mật khẩu thành công
-            reset_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            reset_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
             login_url = f"{request.host_url}login"
             try:
                 msg = Message(
@@ -469,7 +499,7 @@ def reset_password():
 
         user = User.query.filter_by(email=email).first()
         if user and user.reset_token:
-            if not user.reset_token_expiry or user.reset_token_expiry < datetime.utcnow():
+            if not user.reset_token_expiry or user.reset_token_expiry < datetime.now(timezone.utc):
                 user.reset_attempts = 0
                 user.reset_token = None
                 user.reset_token_expiry = None
@@ -488,10 +518,9 @@ def reset_password():
                 logger.warning("User %s nhập sai mã xác nhận, lần thử %s", user.user_id, user.reset_attempts)
                 return jsonify({'message': f'Mã xác nhận không chính xác. Bạn còn {3 - user.reset_attempts} lần thử.'}), 400
             
-            # Revoke all refresh tokens for this user
             refresh_tokens = RefreshToken.query.filter_by(user_id=user.user_id, type='USER', revoked_at=None).all()
             for token in refresh_tokens:
-                token.revoked_at = datetime.utcnow()
+                token.revoked_at = datetime.now(timezone.utc)
 
             user.password_hash = generate_password_hash(new_password)
             user.reset_token = None
@@ -500,8 +529,7 @@ def reset_password():
             execute_with_retry(lambda: db.session.commit())
             logger.info("Mật khẩu user %s đã được đặt lại", user.user_id)
 
-            # Gửi email thông báo đặt lại mật khẩu thành công
-            reset_time = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            reset_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
             login_url = f"{request.host_url}login"
             try:
                 msg = Message(

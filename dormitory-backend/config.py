@@ -47,3 +47,15 @@ class Config:
 
         # NGROK settings
         self.NGROK_URL = os.getenv('NGROK_URL')
+
+        # Rate limiter and Redis settings
+        self.REDIS_STORAGE_URI = os.getenv('REDIS_STORAGE_URI')
+        if not self.REDIS_STORAGE_URI:
+            raise ValueError("REDIS_STORAGE_URI is not set in environment variables")
+        self.REDIS_CACHE_URI = os.getenv('REDIS_CACHE_URI')
+        if not self.REDIS_CACHE_URI:
+            raise ValueError("REDIS_CACHE_URI is not set in environment variables")
+        self.RATE_LIMIT_DEFAULT = os.getenv('RATE_LIMIT_DEFAULT')
+        if not self.RATE_LIMIT_DEFAULT:
+            raise ValueError("RATE_LIMIT_DEFAULT is not set in environment variables")
+        self.RATE_LIMIT_DEFAULT = self.RATE_LIMIT_DEFAULT.split(',')

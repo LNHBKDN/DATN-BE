@@ -298,7 +298,7 @@ def get_room_status_stats():
                     area_rooms = []
                     for room_id, room_data in area_data['rooms'].items():
                         monthly_status = [
-                            {'month': m, 'status': row_data['monthly_status'][m]}
+                            {'month': m, 'status': room_data['monthly_status'][m]}
                             for m in range(1, 13)
                         ]
                         area_rooms.append({

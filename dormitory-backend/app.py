@@ -7,8 +7,6 @@ from config import Config
 from dotenv import load_dotenv
 from pathlib import Path
 from flask_swagger_ui import get_swaggerui_blueprint
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
 from flask_caching import Cache
 from flask_cors import CORS
 from celery import Celery
@@ -16,7 +14,7 @@ from models.refresh_tokens import RefreshToken
 import firebase_admin
 from firebase_admin import credentials, messaging
 
-# Load biến môi trường
+# Load biến môi trường từ file .env
 dotenv_path = Path(__file__).resolve().parent / '.env'
 load_dotenv(dotenv_path)
 
@@ -24,10 +22,10 @@ load_dotenv(dotenv_path)
 cred = credentials.Certificate('firebase-adminsdk.json')
 firebase_admin.initialize_app(cred)
 
-# Khởi tạo Flask app
+# Khởi tạo ứng dụng Flask
 app = Flask(__name__)
 
-# Cấu hình logging
+# Cấu hình logging với mã hóa UTF-8
 logging.basicConfig(
     filename='app.log',
     level=logging.INFO,
@@ -41,29 +39,16 @@ CORS(app, resources={r"/api/*": {
     "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     "allow_headers": ["Content-Type", "Authorization", "Range"],
     "expose_headers": ["Content-Range", "Accept-Ranges"],
-    "supports_credentials": False
+    "supports_credentials": False,
 }})
 
-# Cấu hình Celery
-def make_celery(app):
-    celery = Celery(
-        app.import_name,
-        broker=app.config['CELERY_BROKER_URL'],
-        backend=app.config['CELERY_RESULT_BACKEND']
-    )
-    celery.conf.update(app.config)
-    
-    class ContextTask(celery.Task):
-        def __call__(self, *args, **kwargs):
-            with app.app_context():
-                return self.run(*args, **kwargs)
-    
-    celery.Task = ContextTask
-    return celery
+# Cấu hình ứng dụng trước khi khởi tạo các extension
+app.config.from_object(Config())
+app.config['RATELIMIT_STORAGE_URI'] = app.config['REDIS_STORAGE_URI']
+app.config['RATELIMIT_DEFAULT_LIMITS'] = app.config['RATE_LIMIT_DEFAULT']
 
-app.config['CELERY_BROKER_URL'] = 'redis://localhost:6379/0'
-app.config['CELERY_RESULT_BACKEND'] = 'redis://localhost:6379/0'
-celery = make_celery(app)
+# Khởi tạo Celery
+celery = Celery(app.name, broker=app.config['REDIS_STORAGE_URI'])
 
 # Cấu hình Swagger UI
 SWAGGER_URL = '/docs'
@@ -74,12 +59,22 @@ swaggerui_blueprint = get_swaggerui_blueprint(
     config={'app_name': "Dormitory API"}
 )
 
+# Thêm cấu hình upload
+app.config['ALLOWED_EXTENSIONS'] = {'png', 'jpg', 'jpeg', 'gif'}
+app.config['MAX_FILE_SIZE'] = 5 * 1024 * 1024  # 5MB
+
 # Cấu hình Flask-Caching
-cache = Cache(config={'CACHE_TYPE': 'redis', 'CACHE_REDIS_URL': 'redis://localhost:6379/1'})
+cache = Cache(config={'CACHE_TYPE': 'redis', 'CACHE_REDIS_URL': app.config['REDIS_CACHE_URI']})
 cache.init_app(app)
 
+# Khởi tạo extensions
+db.init_app(app)
+migrate.init_app(app, db)
+jwt.init_app(app)
+mail.init_app(app)
+limiter.init_app(app)
+
 app.register_blueprint(swaggerui_blueprint, url_prefix=SWAGGER_URL)
-app.config.from_object(Config())
 logger = logging.getLogger(__name__)
 
 # Kiểm tra JWT_SECRET_KEY
@@ -87,29 +82,34 @@ if app.config.get('JWT_SECRET_KEY') == 'your_jwt_secret_key_here':
     logger.warning("JWT_SECRET_KEY đang sử dụng giá trị mặc định, điều này không an toàn trong môi trường production!")
 
 print("DB URI:", app.config.get('SQLALCHEMY_DATABASE_URI'))
-db.init_app(app)
-migrate.init_app(app, db)
-jwt.init_app(app)
-mail.init_app(app)
-limiter.init_app(app)
 
-# Cấu hình thư mục upload
-UPLOAD_BASE = os.path.join(app.root_path, 'Uploads')
+# Cấu hình thư mục upload gốc
+UPLOAD_BASE = os.getenv('UPLOAD_BASE', os.path.join(app.root_path, 'Uploads'))
 os.makedirs(UPLOAD_BASE, exist_ok=True)
 app.config['UPLOAD_BASE'] = UPLOAD_BASE
-REPORT_IMAGES_FOLDER = os.path.join(UPLOAD_BASE, 'report_images')
+
+# Thư mục cho report_images
+REPORT_IMAGES_FOLDER = os.getenv('REPORT_IMAGES_FOLDER', os.path.join(UPLOAD_BASE, 'report_images'))
 os.makedirs(REPORT_IMAGES_FOLDER, exist_ok=True)
 app.config['REPORT_IMAGES_FOLDER'] = REPORT_IMAGES_FOLDER
-NOTIFICATION_MEDIA_BASE = os.path.join(UPLOAD_BASE, 'notification_media')
+
+# Thư mục cho notification_media
+NOTIFICATION_MEDIA_BASE = os.getenv('NOTIFICATION_MEDIA_BASE', os.path.join(UPLOAD_BASE, 'notification_media'))
 os.makedirs(NOTIFICATION_MEDIA_BASE, exist_ok=True)
 app.config['NOTIFICATION_MEDIA_BASE'] = NOTIFICATION_MEDIA_BASE
-ROOM_IMAGES_BASE = os.path.join(UPLOAD_BASE, 'roomimage')
+
+# Thư mục gốc cho roomimage
+ROOM_IMAGES_BASE = os.getenv('ROOM_IMAGES_BASE', os.path.join(UPLOAD_BASE, 'roomimage'))
 os.makedirs(ROOM_IMAGES_BASE, exist_ok=True)
 app.config['ROOM_IMAGES_BASE'] = ROOM_IMAGES_BASE
-AVATAR_UPLOAD_FOLDER = os.path.join(UPLOAD_BASE, 'avatars')
+
+# Thư mục cho avatars
+AVATAR_UPLOAD_FOLDER = os.getenv('AVATAR_UPLOAD_FOLDER', os.path.join(UPLOAD_BASE, 'avatars'))
 os.makedirs(AVATAR_UPLOAD_FOLDER, exist_ok=True)
 app.config['AVATAR_UPLOAD_FOLDER'] = AVATAR_UPLOAD_FOLDER
-TRASH_BASE = os.path.join(UPLOAD_BASE, 'trash')
+
+# Thư mục rác
+TRASH_BASE = os.getenv('TRASH_BASE', os.path.join(UPLOAD_BASE, 'trash'))
 os.makedirs(TRASH_BASE, exist_ok=True)
 app.config['TRASH_BASE'] = TRASH_BASE
 
@@ -134,8 +134,6 @@ from models.payment_transaction import PaymentTransaction
 from models.admin import Admin
 from models.token_blacklist import TokenBlacklist
 from models.notification_media import NotificationMedia
-from models.room_status_history import RoomStatusHistory
-from models.user_room_history import UserRoomHistory
 
 # Import controllers
 from controllers.auth_controller import auth_bp
@@ -181,7 +179,7 @@ app.register_blueprint(report_type_bp, url_prefix='/api')
 app.register_blueprint(notification_type_bp, url_prefix='/api')
 app.register_blueprint(statistics_bp, url_prefix='/api')
 
-# Debug routes, file serving, error handlers, JWT blocklist loader
+# Debug route to list all registered routes
 @app.route('/debug/routes')
 def debug_routes():
     routes = []
@@ -194,6 +192,7 @@ def debug_routes():
     logger.info("Registered routes: %s", routes)
     return jsonify(routes)
 
+# Route phục vụ file tĩnh cho roomimage
 @app.route('/api/roomimage/<path:filename>')
 def serve_room_image(filename):
     logger.info(f"Serving room image: {filename}")
@@ -209,6 +208,7 @@ def serve_room_image(filename):
         logger.error(f"Error serving room image {filename}: {str(e)}")
         return jsonify({'message': f'Không tìm thấy hình ảnh: {filename}'}), 404
 
+# Route phục vụ file tĩnh cho reportimage
 @app.route('/api/reportimage/<path:filename>')
 def serve_report_image(filename):
     logger.info(f"Serving report image: {filename}")
@@ -228,6 +228,7 @@ def serve_report_image(filename):
         logger.error(f"Error serving report image {filename}: {str(e)}")
         return jsonify({'message': f'Không tìm thấy tệp: {filename}'}), 404
 
+# Route phục vụ file tĩnh cho notification media
 @app.route('/api/notification_media/<path:filename>')
 def serve_noti_image(filename):
     logger.info(f"Serving notification media: {filename}")
@@ -247,6 +248,7 @@ def serve_noti_image(filename):
         logger.error(f"Error serving notification media {filename}: {str(e)}")
         return jsonify({'message': f'Không tìm thấy tệp: {filename}'}), 404
 
+# Route phục vụ file tĩnh cho avatar
 @app.route('/api/avatars/<path:filename>')
 def serve_avatar(filename):
     logger.info(f"Serving avatar: {filename}")
@@ -262,10 +264,12 @@ def serve_avatar(filename):
         logger.error(f"Error serving avatar {filename}: {str(e)}")
         return jsonify({'message': f'Không tìm thấy ảnh: {filename}'}), 404
 
+# Route phục vụ file tĩnh
 @app.route('/Uploads/<path:filename>')
 def uploaded_file(filename):
-    return send_from_directory(app.config['UPLOAD_BASE'], filename)
+    return send_from_directory(UPLOAD_BASE, filename)
 
+# Log tất cả các yêu cầu
 @app.before_request
 def log_request():
     logger.info(f"Before request: method={request.method}, url={request.url}, headers={request.headers}")
@@ -273,6 +277,7 @@ def log_request():
         logger.info("Handling OPTIONS preflight request")
         return '', 200
 
+# Error handlers
 @app.errorhandler(404)
 def not_found(error):
     logger.error("404 Error: %s", str(error))
@@ -301,7 +306,8 @@ init_scheduler(db)
 def check_if_token_revoked(jwt_header, jwt_payload):
     try:
         jti = jwt_payload['jti']
-        token_type = jwt_payload.get('type')
+        token_type = jwt_payload.get('type')  # 'access' or 'refresh'
+
         if token_type == 'access':
             from models.token_blacklist import TokenBlacklist
             token = TokenBlacklist.query.filter_by(jti=jti).first()
@@ -309,6 +315,7 @@ def check_if_token_revoked(jwt_header, jwt_payload):
                 logger.debug("Access token %s đã bị vô hiệu hóa", jti)
                 return True
             logger.debug("Access token %s không có trong danh sách đen", jti)
+
         if token_type == 'refresh':
             refresh_token = RefreshToken.query.filter_by(jti=jti).first()
             if refresh_token:
@@ -319,6 +326,7 @@ def check_if_token_revoked(jwt_header, jwt_payload):
             else:
                 logger.debug("Refresh token %s không tồn tại", jti)
                 return True
+
         return False
     except Exception as e:
         logger.error("Lỗi khi kiểm tra blacklist token: %s", str(e))

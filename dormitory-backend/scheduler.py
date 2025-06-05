@@ -16,6 +16,7 @@ import os
 import logging
 import pendulum
 import shutil
+import json
 from flask import current_app
 from controllers.statistics_controller import snapshot_room_status, save_user_room_snapshot
 

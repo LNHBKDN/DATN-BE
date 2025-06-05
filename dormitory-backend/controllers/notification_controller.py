@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, current_app
 from flask_jwt_extended import jwt_required, get_jwt
 from extensions import db
 from models.notification import Notification
@@ -14,20 +14,19 @@ import logging
 import re
 from datetime import datetime
 import bleach
-import imghdr  # Thư viện để kiểm tra định dạng hình ảnh
-from PIL import Image  # Thư viện Pillow để xử lý hình ảnh
+import imghdr
+from PIL import Image
 from utils.fcm import send_fcm_notification
 
 # Thiết lập logging
 logger = logging.getLogger(__name__)
 
 notification_bp = Blueprint('notification', __name__)
-UPLOAD_FOLDER = 'Uploads/notification_media'
 ALLOWED_EXTENSIONS = {'jpg', 'jpeg', 'png', 'mp4', 'avi', 'pdf', 'doc', 'docx'}
 IMAGE_EXTENSIONS = {'jpg', 'jpeg', 'png'}
 VIDEO_EXTENSIONS = {'mp4', 'avi'}
 DOCUMENT_EXTENSIONS = {'pdf', 'doc', 'docx'}
-MAX_FILES = 20  # Tăng từ 15 lên 20
+MAX_FILES = 20
 MAX_IMAGES = 10
 MAX_DOCUMENTS = 5
 MAX_IMAGE_SIZE = 50 * 1024 * 1024  # 50MB mỗi ảnh
@@ -56,8 +55,6 @@ def generate_filename(created_at, notification_id, extension, folder):
         counter += 1
     return filename
 
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-
 # Function to send FCM notifications to multiple users
 def send_fcm_notification_to_multiple(user_ids, title, message, data=None):
     for user_id in user_ids:
@@ -69,10 +66,8 @@ def get_public_general_notifications():
     page = request.args.get('page', 1, type=int)
     limit = request.args.get('limit', 10, type=int)
 
-    # Lọc thông báo có target_type='ALL' và không phải SYSTEM
     notifications = Notification.query.filter_by(target_type='ALL', is_deleted=False).filter(Notification.target_type != 'SYSTEM').paginate(page=page, per_page=limit)
 
-    # Thêm danh sách media vào phản hồi
     notifications_list = []
     for notification in notifications.items:
         media_query = NotificationMedia.query.filter_by(
@@ -82,7 +77,7 @@ def get_public_general_notifications():
         media_items = media_query.all()
         media_list = [m.to_dict() for m in media_items]
         notification_dict = notification.to_dict()
-        notification_dict['media'] = media_list  # Thêm danh sách media
+        notification_dict['media'] = media_list
         notifications_list.append(notification_dict)
 
     logger.info(f"Public general notifications fetched: {len(notifications_list)} items")
@@ -100,10 +95,8 @@ def get_general_notifications():
     page = request.args.get('page', 1, type=int)
     limit = request.args.get('limit', 10, type=int)
 
-    # Lọc thông báo có target_type='ALL' và không phải SYSTEM
     notifications = Notification.query.filter_by(target_type='ALL', is_deleted=False).filter(Notification.target_type != 'SYSTEM').paginate(page=page, per_page=limit)
 
-    # Thêm danh sách media vào phản hồi
     notifications_list = []
     for notification in notifications.items:
         media_query = NotificationMedia.query.filter_by(
@@ -113,7 +106,7 @@ def get_general_notifications():
         media_items = media_query.all()
         media_list = [m.to_dict() for m in media_items]
         notification_dict = notification.to_dict()
-        notification_dict['media'] = media_list  # Thêm danh sách media
+        notification_dict['media'] = media_list
         notifications_list.append(notification_dict)
 
     logger.info(f"General notifications fetched: {len(notifications_list)} items")
@@ -137,7 +130,6 @@ def get_all_notifications():
         logger.warning("Invalid limit value: %s", limit)
         return jsonify({'message': 'Limit must be between 1 and 100'}), 422
 
-    # Lọc thông báo không phải SYSTEM
     query = Notification.query.filter_by(is_deleted=False).filter(Notification.target_type != 'SYSTEM')
     if target_type:
         target_type = target_type.upper()
@@ -147,7 +139,6 @@ def get_all_notifications():
         query = query.filter_by(target_type=target_type)
 
     notifications = query.paginate(page=page, per_page=limit, error_out=False)
-    # Thêm danh sách media vào phản hồi
     notifications_list = []
     for notification in notifications.items:
         media_query = NotificationMedia.query.filter_by(
@@ -157,7 +148,7 @@ def get_all_notifications():
         media_items = media_query.all()
         media_list = [m.to_dict() for m in media_items]
         notification_dict = notification.to_dict()
-        notification_dict['media'] = media_list  # Thêm danh sách media
+        notification_dict['media'] = media_list
         notifications_list.append(notification_dict)
         logger.info(f"Notification ID {notification.id} has {len(media_list)} media items: {media_list}")
 
@@ -200,6 +191,11 @@ def get_notification_recipients(notification_id):
 @admin_required()
 def create_notification():
     try:
+        UPLOAD_FOLDER = current_app.config['NOTIFICATION_MEDIA_BASE']
+        if not os.access(UPLOAD_FOLDER, os.W_OK):
+            logger.error(f"Không có quyền ghi vào thư mục: {UPLOAD_FOLDER}")
+            return jsonify({'message': 'Không có quyền ghi vào thư mục lưu trữ'}), 500
+
         if not request.content_type.startswith('multipart/form-data'):
             logger.warning("Yêu cầu không phải multipart/form-data")
             return jsonify({'message': 'Yêu cầu multipart/form-data'}), 400
@@ -325,11 +321,10 @@ def create_notification():
                     logger.warning("Ảnh quá lớn: filename=%s, size=%s, max=%s", file.filename, file_size, MAX_IMAGE_SIZE)
                     failed_uploads.append({'index': index, 'error': f'Ảnh {file.filename} quá lớn. Tối đa {MAX_IMAGE_SIZE // (1024 * 1024)}MB'})
                     continue
-                # Kiểm tra định dạng hình ảnh
                 try:
                     image = Image.open(file)
-                    image.verify()  # Kiểm tra tính toàn vẹn của hình ảnh
-                    file.seek(0)  # Đặt lại con trỏ file sau khi kiểm tra
+                    image.verify()
+                    file.seek(0)
                 except Exception as e:
                     logger.error(f"File hình ảnh không hợp lệ: filename={file.filename}, error={str(e)}")
                     failed_uploads.append({'index': index, 'error': f'File hình ảnh {file.filename} không hợp lệ: {str(e)}'})
@@ -460,6 +455,11 @@ def create_notification():
 @admin_required()
 def update_notification(notification_id):
     try:
+        UPLOAD_FOLDER = current_app.config['NOTIFICATION_MEDIA_BASE']
+        if not os.access(UPLOAD_FOLDER, os.W_OK):
+            logger.error(f"Không có quyền ghi vào thư mục: {UPLOAD_FOLDER}")
+            return jsonify({'message': 'Không có quyền ghi vào thư mục lưu trữ'}), 500
+
         notification = Notification.query.get(notification_id)
         if not notification:
             logger.warning("Không tìm thấy thông báo: notification_id=%s", notification_id)
@@ -529,7 +529,7 @@ def update_notification(notification_id):
             for media in media_to_delete:
                 media.is_deleted = True
                 media.deleted_at = datetime.utcnow()
-                media.notification_id = None  # Đặt notification_id thành NULL
+                media.notification_id = None
                 logger.debug("Soft delete media: media_id=%s", media.media_id)
 
         files = request.files.getlist('media')
@@ -588,11 +588,10 @@ def update_notification(notification_id):
                     logger.warning("Ảnh quá lớn: filename=%s, size=%s, max=%s", file.filename, file_size, MAX_IMAGE_SIZE)
                     failed_uploads.append({'index': index, 'error': f'Ảnh {file.filename} quá lớn. Tối đa {MAX_IMAGE_SIZE // (1024 * 1024)}MB'})
                     continue
-                # Kiểm tra định dạng hình ảnh
                 try:
                     image = Image.open(file)
-                    image.verify()  # Kiểm tra tính toàn vẹn của hình ảnh
-                    file.seek(0)  # Đặt lại con trỏ file sau khi kiểm tra
+                    image.verify()
+                    file.seek(0)
                 except Exception as e:
                     logger.error(f"File hình ảnh không hợp lệ: filename={file.filename}, error={str(e)}")
                     failed_uploads.append({'index': index, 'error': f'File hình ảnh {file.filename} không hợp lệ: {str(e)}'})
@@ -726,7 +725,6 @@ def search_notifications():
     start_date = request.args.get('start_date')
     end_date = request.args.get('end_date')
 
-    # Lọc thông báo không phải SYSTEM
     query = Notification.query.filter_by(is_deleted=False).filter(Notification.target_type != 'SYSTEM')
 
     if keyword:
@@ -740,7 +738,6 @@ def search_notifications():
         query = query.filter(Notification.created_at <= end_date)
 
     notifications = query.paginate(page=page, per_page=limit)
-    # Thêm danh sách media vào phản hồi
     notifications_list = []
     for notification in notifications.items:
         media_query = NotificationMedia.query.filter_by(
@@ -750,7 +747,7 @@ def search_notifications():
         media_items = media_query.all()
         media_list = [m.to_dict() for m in media_items]
         notification_dict = notification.to_dict()
-        notification_dict['media'] = media_list  # Thêm danh sách media
+        notification_dict['media'] = media_list
         notifications_list.append(notification_dict)
         logger.info(f"Notification ID {notification.id} has {len(media_list)} media items: {media_list}")
 
