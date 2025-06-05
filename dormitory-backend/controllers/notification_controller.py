@@ -18,7 +18,6 @@ import imghdr
 from PIL import Image
 from utils.fcm import send_fcm_notification
 
-# Thiết lập logging
 logger = logging.getLogger(__name__)
 
 notification_bp = Blueprint('notification', __name__)
@@ -55,12 +54,10 @@ def generate_filename(created_at, notification_id, extension, folder):
         counter += 1
     return filename
 
-# Function to send FCM notifications to multiple users
 def send_fcm_notification_to_multiple(user_ids, title, message, data=None):
     for user_id in user_ids:
         send_fcm_notification(user_id, title, message, data)
 
-# GetPublicGeneralNotifications (Public)
 @notification_bp.route('/public/notifications/general', methods=['GET'])
 def get_public_general_notifications():
     page = request.args.get('page', 1, type=int)
@@ -88,7 +85,6 @@ def get_public_general_notifications():
         'current_page': notifications.page
     }), 200
 
-# GetGeneralNotifications (Admin)
 @notification_bp.route('/notifications/general', methods=['GET'])
 @admin_required()
 def get_general_notifications():
@@ -117,7 +113,6 @@ def get_general_notifications():
         'current_page': notifications.page
     }), 200
 
-# GetNotifications (Admin)
 @notification_bp.route('/notifications', methods=['GET'])
 @admin_required()
 def get_all_notifications():
@@ -160,7 +155,6 @@ def get_all_notifications():
         'current_page': notifications.page
     }), 200
 
-# GetRecipients (Admin)
 @notification_bp.route('/admin/notifications/<int:notification_id>/recipients', methods=['GET'])
 @admin_required()
 def get_notification_recipients(notification_id):
@@ -186,12 +180,11 @@ def get_notification_recipients(notification_id):
         'current_page': recipients.page
     }), 200
 
-# CreateNotification (Admin)
 @notification_bp.route('/admin/notifications', methods=['POST'])
 @admin_required()
 def create_notification():
     try:
-        UPLOAD_FOLDER = current_app.config['NOTIFICATION_MEDIA_BASE']
+        UPLOAD_FOLDER = current_app.config['NOTIFICATION_MEDIA_BASE'].strip()
         if not os.access(UPLOAD_FOLDER, os.W_OK):
             logger.error(f"Không có quyền ghi vào thư mục: {UPLOAD_FOLDER}")
             return jsonify({'message': 'Không có quyền ghi vào thư mục lưu trữ'}), 500
@@ -209,6 +202,8 @@ def create_notification():
         area_id = data.get('area_id')
         related_entity_type = data.get('related_entity_type')
         related_entity_id = data.get('related_entity_id')
+
+        logger.info(f"Creating notification: title={title}, target_type={target_type}")
 
         if not all([title, message, target_type]):
             logger.warning("Thiếu các trường bắt buộc: title, message, target_type")
@@ -245,7 +240,7 @@ def create_notification():
             if not email:
                 logger.warning("Yêu cầu email cho USER hoặc SYSTEM")
                 return jsonify({'message': 'Yêu cầu email cho USER hoặc SYSTEM'}), 400
-            user = User.query.filter_by(email=email).first()
+            user = User.query.filter_by(email=email, is_deleted=False).first()
             if not user:
                 logger.warning("Không tìm thấy người dùng: email=%s", email)
                 return jsonify({'message': 'Không tìm thấy người dùng với email này'}), 404
@@ -278,8 +273,10 @@ def create_notification():
         db.session.flush()
 
         notification_id = notification.id
+        logger.info(f"Created notification with ID: {notification_id}")
 
         files = request.files.getlist('media')
+        logger.info(f"Received {len(files)} files to upload")
         if len(files) > MAX_FILES:
             logger.warning("Số lượng file vượt quá giới hạn: count=%s, max=%s", len(files), MAX_FILES)
             return jsonify({'message': f'Tối đa {MAX_FILES} file được phép upload'}), 400
@@ -301,6 +298,7 @@ def create_notification():
         document_count = 0
 
         for index, file in enumerate(files):
+            logger.debug(f"Processing file {index}: {file.filename}")
             if file.filename == '':
                 logger.warning("File không có tên: index=%s", index)
                 failed_uploads.append({'index': index, 'error': 'File không có tên'})
@@ -315,6 +313,7 @@ def create_notification():
             file_size = file.tell()
             file.seek(0)
             file_type = get_file_type(file.filename)
+            logger.debug(f"File {file.filename}: type={file_type}, size={file_size}")
 
             if file_type == 'image':
                 if file_size > MAX_IMAGE_SIZE:
@@ -325,6 +324,7 @@ def create_notification():
                     image = Image.open(file)
                     image.verify()
                     file.seek(0)
+                    logger.debug(f"Image verification passed for {file.filename}")
                 except Exception as e:
                     logger.error(f"File hình ảnh không hợp lệ: filename={file.filename}, error={str(e)}")
                     failed_uploads.append({'index': index, 'error': f'File hình ảnh {file.filename} không hợp lệ: {str(e)}'})
@@ -354,10 +354,14 @@ def create_notification():
             extension = file.filename.rsplit('.', 1)[1].lower() if '.' in file.filename else ''
             filename = generate_filename(notification.created_at, notification_id, extension, UPLOAD_FOLDER)
             file_path = os.path.join(UPLOAD_FOLDER, filename)
+            logger.debug(f"Attempting to save file {filename} at {file_path}")
 
             try:
                 file.save(file_path)
-                logger.debug("Lưu file media tại: %s", file_path)
+                if os.path.exists(file_path):
+                    logger.debug("Lưu file media thành công tại: %s", file_path)
+                else:
+                    logger.error("File không tồn tại sau khi lưu: %s", file_path)
             except OSError as e:
                 logger.error("Lỗi khi lưu file media: filename=%s, error=%s", filename, str(e))
                 failed_uploads.append({'index': index, 'error': f'Lỗi khi lưu file {filename}'})
@@ -386,22 +390,31 @@ def create_notification():
                 'type': file_type,
                 'size': file_size,
                 'sort_order': sort_order,
-                'media_url': f"{base_url}/api/notification_media/{filename}"
+                'media_url': f"{base_url}/api/notification_media/{media_url}"
             })
 
         recipients = []
         if target_type == 'ROOM':
-            contracts = Contract.query.filter_by(room_id=target_id_value, status='ACTIVE').all()
+            contracts = Contract.query.filter_by(
+                room_id=target_id_value,
+                status='ACTIVE',
+                is_deleted=False
+            ).all()
             recipients = [contract.user_id for contract in contracts]
         elif target_type in ['USER', 'SYSTEM']:
             recipients = [target_id_value]
         elif target_type == 'ALL':
-            recipients = [user.user_id for user in User.query.all()]
+            recipients = [user.user_id for user in User.query.filter_by(is_deleted=False).all()]
 
         media_message = f" (kèm {image_count} ảnh, {video_count} video, {document_count} tài liệu)" if (image_count + video_count + document_count) > 0 else ""
 
         for user_id in recipients:
-            recipient = NotificationRecipient(notification_id=notification.id, user_id=user_id)
+            # Rõ ràng đặt is_read=False, read_at=None khi tạo mới (chưa đọc)
+            recipient = NotificationRecipient(
+                notification_id=notification.id,
+                user_id=user_id,
+                is_read=False
+            )
             db.session.add(recipient)
             user = User.query.get(user_id)
             if user and user.email:
@@ -450,12 +463,11 @@ def create_notification():
         logger.error("Lỗi server khi xử lý yêu cầu: %s", str(e))
         return jsonify({'message': 'Lỗi server nội bộ, vui lòng thử lại sau'}), 500
 
-# UpdateNotification (Admin)
 @notification_bp.route('/admin/notifications/<int:notification_id>', methods=['PUT'])
 @admin_required()
 def update_notification(notification_id):
     try:
-        UPLOAD_FOLDER = current_app.config['NOTIFICATION_MEDIA_BASE']
+        UPLOAD_FOLDER = current_app.config['NOTIFICATION_MEDIA_BASE'].strip()
         if not os.access(UPLOAD_FOLDER, os.W_OK):
             logger.error(f"Không có quyền ghi vào thư mục: {UPLOAD_FOLDER}")
             return jsonify({'message': 'Không có quyền ghi vào thư mục lưu trữ'}), 500
@@ -478,6 +490,8 @@ def update_notification(notification_id):
         email = data.get('email')
         room_name = data.get('room_name')
         area_id = data.get('area_id')
+
+        logger.info(f"Updating notification {notification_id}: message={message}")
 
         if not message:
             logger.warning("Thiếu trường message")
@@ -507,7 +521,7 @@ def update_notification(notification_id):
                 target_id_value = room.room_id
         elif notification.target_type in ['USER', 'SYSTEM']:
             if email:
-                user = User.query.filter_by(email=email).first()
+                user = User.query.filter_by(email=email, is_deleted=False).first()
                 if not user:
                     logger.warning("Không tìm thấy người dùng: email=%s", email)
                     return jsonify({'message': 'Không tìm thấy người dùng với email này'}), 404
@@ -533,6 +547,7 @@ def update_notification(notification_id):
                 logger.debug("Soft delete media: media_id=%s", media.media_id)
 
         files = request.files.getlist('media')
+        logger.info(f"Received {len(files)} files to upload for notification {notification_id}")
         current_media_count = NotificationMedia.query.filter_by(
             notification_id=notification_id,
             is_deleted=False
@@ -568,6 +583,7 @@ def update_notification(notification_id):
         document_count = current_document_count
 
         for index, file in enumerate(files):
+            logger.debug(f"Processing file {index}: {file.filename}")
             if file.filename == '':
                 logger.warning("File không có tên: index=%s", index)
                 failed_uploads.append({'index': index, 'error': 'File không có tên'})
@@ -582,6 +598,7 @@ def update_notification(notification_id):
             file_size = file.tell()
             file.seek(0)
             file_type = get_file_type(file.filename)
+            logger.debug(f"File {file.filename}: type={file_type}, size={file_size}")
 
             if file_type == 'image':
                 if file_size > MAX_IMAGE_SIZE:
@@ -592,6 +609,7 @@ def update_notification(notification_id):
                     image = Image.open(file)
                     image.verify()
                     file.seek(0)
+                    logger.debug(f"Image verification passed for {file.filename}")
                 except Exception as e:
                     logger.error(f"File hình ảnh không hợp lệ: filename={file.filename}, error={str(e)}")
                     failed_uploads.append({'index': index, 'error': f'File hình ảnh {file.filename} không hợp lệ: {str(e)}'})
@@ -621,10 +639,14 @@ def update_notification(notification_id):
             extension = file.filename.rsplit('.', 1)[1].lower() if '.' in file.filename else ''
             filename = generate_filename(notification.created_at, notification_id, extension, UPLOAD_FOLDER)
             file_path = os.path.join(UPLOAD_FOLDER, filename)
+            logger.debug(f"Attempting to save file {filename} at {file_path}")
 
             try:
                 file.save(file_path)
-                logger.debug("Lưu file media tại: %s", file_path)
+                if os.path.exists(file_path):
+                    logger.debug("Lưu file media thành công tại: %s", file_path)
+                else:
+                    logger.error("File không tồn tại sau khi lưu: %s", file_path)
             except OSError as e:
                 logger.error("Lỗi khi lưu file media: filename=%s, error=%s", filename, str(e))
                 failed_uploads.append({'index': index, 'error': f'Lỗi khi lưu file {filename}'})
@@ -653,7 +675,7 @@ def update_notification(notification_id):
                 'type': file_type,
                 'size': file_size,
                 'sort_order': sort_order,
-                'media_url': f"{base_url}/api/notification_media/{filename}"
+                'media_url': f"{base_url}/api/notification_media/{media_url}"
             })
 
         try:
@@ -677,7 +699,6 @@ def update_notification(notification_id):
         logger.error("Lỗi server khi cập nhật thông báo: %s", str(e))
         return jsonify({'message': 'Lỗi server nội bộ, vui lòng thử lại sau'}), 500
 
-# DeleteNotification (Admin)
 @notification_bp.route('/admin/notifications/<int:notification_id>', methods=['DELETE'])
 @admin_required()
 def delete_notification(notification_id):
@@ -715,7 +736,6 @@ def delete_notification(notification_id):
         logger.error("Lỗi server khi xóa thông báo: %s", str(e))
         return jsonify({'message': 'Lỗi server nội bộ, vui lòng thử lại sau'}), 500
 
-# SearchNotifications (Admin)
 @notification_bp.route('/admin/notifications/search', methods=['GET'])
 @admin_required()
 def search_notifications():

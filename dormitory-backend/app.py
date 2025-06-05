@@ -84,34 +84,40 @@ if app.config.get('JWT_SECRET_KEY') == 'your_jwt_secret_key_here':
 print("DB URI:", app.config.get('SQLALCHEMY_DATABASE_URI'))
 
 # Cấu hình thư mục upload gốc
-UPLOAD_BASE = os.getenv('UPLOAD_BASE', os.path.join(app.root_path, 'Uploads'))
+UPLOAD_BASE = os.getenv('UPLOAD_BASE', os.path.join(app.root_path, 'Uploads')).strip()
 os.makedirs(UPLOAD_BASE, exist_ok=True)
 app.config['UPLOAD_BASE'] = UPLOAD_BASE
+logger.info("UPLOAD_BASE: %s", UPLOAD_BASE)
 
 # Thư mục cho report_images
-REPORT_IMAGES_FOLDER = os.getenv('REPORT_IMAGES_FOLDER', os.path.join(UPLOAD_BASE, 'report_images'))
+REPORT_IMAGES_FOLDER = os.getenv('REPORT_IMAGES_FOLDER', os.path.join(UPLOAD_BASE, 'report_images')).strip()
 os.makedirs(REPORT_IMAGES_FOLDER, exist_ok=True)
 app.config['REPORT_IMAGES_FOLDER'] = REPORT_IMAGES_FOLDER
+logger.info("REPORT_IMAGES_FOLDER: %s", REPORT_IMAGES_FOLDER)
 
 # Thư mục cho notification_media
-NOTIFICATION_MEDIA_BASE = os.getenv('NOTIFICATION_MEDIA_BASE', os.path.join(UPLOAD_BASE, 'notification_media'))
+NOTIFICATION_MEDIA_BASE = os.getenv('NOTIFICATION_MEDIA_BASE', os.path.join(UPLOAD_BASE, 'notification_media')).strip()
 os.makedirs(NOTIFICATION_MEDIA_BASE, exist_ok=True)
 app.config['NOTIFICATION_MEDIA_BASE'] = NOTIFICATION_MEDIA_BASE
+logger.info("NOTIFICATION_MEDIA_BASE: %s", NOTIFICATION_MEDIA_BASE)
 
 # Thư mục gốc cho roomimage
-ROOM_IMAGES_BASE = os.getenv('ROOM_IMAGES_BASE', os.path.join(UPLOAD_BASE, 'roomimage'))
+ROOM_IMAGES_BASE = os.getenv('ROOM_IMAGES_BASE', os.path.join(UPLOAD_BASE, 'roomimage')).strip()
 os.makedirs(ROOM_IMAGES_BASE, exist_ok=True)
 app.config['ROOM_IMAGES_BASE'] = ROOM_IMAGES_BASE
+logger.info("ROOM_IMAGES_BASE: %s", ROOM_IMAGES_BASE)
 
 # Thư mục cho avatars
-AVATAR_UPLOAD_FOLDER = os.getenv('AVATAR_UPLOAD_FOLDER', os.path.join(UPLOAD_BASE, 'avatars'))
+AVATAR_UPLOAD_FOLDER = os.getenv('AVATAR_UPLOAD_FOLDER', os.path.join(UPLOAD_BASE, 'avatars')).strip()
 os.makedirs(AVATAR_UPLOAD_FOLDER, exist_ok=True)
 app.config['AVATAR_UPLOAD_FOLDER'] = AVATAR_UPLOAD_FOLDER
+logger.info("AVATAR_UPLOAD_FOLDER: %s", AVATAR_UPLOAD_FOLDER)
 
 # Thư mục rác
-TRASH_BASE = os.getenv('TRASH_BASE', os.path.join(UPLOAD_BASE, 'trash'))
+TRASH_BASE = os.getenv('TRASH_BASE', os.path.join(UPLOAD_BASE, 'trash')).strip()
 os.makedirs(TRASH_BASE, exist_ok=True)
 app.config['TRASH_BASE'] = TRASH_BASE
+logger.info("TRASH_BASE: %s", TRASH_BASE)
 
 # Import models
 from models.area import Area
@@ -319,7 +325,7 @@ def check_if_token_revoked(jwt_header, jwt_payload):
         if token_type == 'refresh':
             refresh_token = RefreshToken.query.filter_by(jti=jti).first()
             if refresh_token:
-                if refresh_token.revoked_at or refresh_token.expires_at < datetime.utcnow():
+                if refresh_token.revoked_at or refresh_token.expires_at < datetime.datetime.now(datetime.timezone.utc):
                     logger.debug("Refresh token %s đã bị thu hồi hoặc hết hạn", jti)
                     return True
                 logger.debug("Refresh token %s hợp lệ", jti)

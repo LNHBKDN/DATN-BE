@@ -99,7 +99,6 @@ def execute_with_retry(operation, max_retries=3, delay=1):
 
 @auth_bp.route('/auth/admin/login', methods=['POST'])
 def admin_login():
-    """Authenticate an admin using username and return JWT tokens."""
     try:
         data = request.get_json(silent=True)
         if not data:
@@ -115,22 +114,22 @@ def admin_login():
         result = authenticate_admin(username, password)
         if result:
             access_token = result[0]['access_token']
-            refresh_token = result[0]['refresh_token'] if remember_me else None
+            refresh_token = result[0]['refresh_token']  # Always return refresh_token
             admin_id = result[0]['id']
             
-            if remember_me:
-                refresh_token_decoded = decode_token(refresh_token)
-                refresh_jti = refresh_token_decoded['jti']
-                expires_at = datetime.now(timezone.utc) + current_app.config['JWT_REFRESH_TOKEN_EXPIRES']
-                refresh_token_entry = RefreshToken(
-                    jti=refresh_jti,
-                    admin_id=admin_id,
-                    type='ADMIN',
-                    expires_at=expires_at,
-                    created_at=datetime.now(timezone.utc)
-                )
-                db.session.add(refresh_token_entry)
-                execute_with_retry(lambda: db.session.commit())
+            # Store refresh_token in the database
+            refresh_token_decoded = decode_token(refresh_token)
+            refresh_jti = refresh_token_decoded['jti']
+            expires_at = datetime.now(timezone.utc) + current_app.config['JWT_REFRESH_TOKEN_EXPIRES']
+            refresh_token_entry = RefreshToken(
+                jti=refresh_jti,
+                admin_id=admin_id,
+                type='ADMIN',
+                expires_at=expires_at,
+                created_at=datetime.now(timezone.utc)
+            )
+            db.session.add(refresh_token_entry)
+            execute_with_retry(lambda: db.session.commit())
 
             logger.info("Admin login successful: admin_id %s", admin_id)
             
@@ -158,7 +157,6 @@ def admin_login():
 
 @auth_bp.route('/auth/user/login', methods=['POST'])
 def user_login():
-    """Authenticate a user using email and return JWT tokens."""
     try:
         data = request.get_json(silent=True)
         if not data:
@@ -167,13 +165,14 @@ def user_login():
         email = data.get('email')
         password = data.get('password')
         remember_me = data.get('remember_me', False)
+        fcm_token = data.get('fcm_token')  # Thêm fcm_token
         
         if not email:
             return jsonify({'message': 'Yêu cầu nhập email'}), 400
         if not password:
             return jsonify({'message': 'Yêu cầu nhập mật khẩu'}), 400
 
-        email_regex = r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA.Z0-9-.]+$'
+        email_regex = r'^[a-zA-Z0-9_.+-]+@[a-zA.Z0-9-]+\.[a-zA.Z0-9-.]+$'
         if not re.match(email_regex, email):
             return jsonify({'message': 'Định dạng email không hợp lệ'}), 400
         
@@ -198,37 +197,43 @@ def user_login():
             logger.warning("User login failed: contract for user %s is not active, status: %s", user.email, contract.calculated_status)
             return jsonify({'message': 'Hợp đồng của bạn chưa ở trạng thái ACTIVE, không thể đăng nhập'}), 403
 
+        # Cập nhật fcm_token nếu có
+        if fcm_token:
+            user.fcm_token = fcm_token
+            db.session.commit()
+            logger.info(f"Updated FCM token for user_id={user.user_id}")
+
         access_token = create_access_token(
             identity=str(user.user_id),
             additional_claims={'type': 'USER'},
             fresh=False,
             expires_delta=current_app.config['JWT_ACCESS_TOKEN_EXPIRES']
         )
-        refresh_token = create_refresh_token(
+        refresh_token = create_refresh_token(  # Always create refresh_token
             identity=str(user.user_id),
             additional_claims={'type': 'USER'},
             expires_delta=current_app.config['JWT_REFRESH_TOKEN_EXPIRES']
-        ) if remember_me else None
+        )
         
-        if remember_me:
-            refresh_token_decoded = decode_token(refresh_token)
-            refresh_jti = refresh_token_decoded['jti']
-            expires_at = datetime.now(timezone.utc) + current_app.config['JWT_REFRESH_TOKEN_EXPIRES']
-            refresh_token_entry = RefreshToken(
-                jti=refresh_jti,
-                user_id=user.user_id,
-                type='USER',
-                expires_at=expires_at,
-                created_at=datetime.now(timezone.utc)
-            )
-            db.session.add(refresh_token_entry)
-            execute_with_retry(lambda: db.session.commit())
+        # Store refresh_token in the database
+        refresh_token_decoded = decode_token(refresh_token)
+        refresh_jti = refresh_token_decoded['jti']
+        expires_at = datetime.now(timezone.utc) + current_app.config['JWT_REFRESH_TOKEN_EXPIRES']
+        refresh_token_entry = RefreshToken(
+            jti=refresh_jti,
+            user_id=user.user_id,
+            type='USER',
+            expires_at=expires_at,
+            created_at=datetime.now(timezone.utc)
+        )
+        db.session.add(refresh_token_entry)
+        execute_with_retry(lambda: db.session.commit())
 
         logger.info("User login successful: user_id %s", user.user_id)
         
         response = jsonify({
             'access_token': access_token,
-            'refresh_token': refresh_token,
+            'refresh_token': refresh_token,  # Always return refresh_token
             'id': user.user_id,
             'type': 'USER'
         })
@@ -365,7 +370,7 @@ def forgot_password():
         if not email:
             return jsonify({'message': 'Yêu cầu nhập email'}), 400
 
-        email_regex = r'^[a-zA-Z0-9_.+-]+@[a-zA.Z0-9-]+\.[a-zA.Z0-9-.]+$'
+        email_regex = r'^[a-zA.Z0-9_.+-]+@[a.zA-Z0-9-]+\.[a.zA.Z0-9-.]+$'
         if not re.match(email_regex, email):
             return jsonify({'message': 'Định dạng email không hợp lệ'}), 400
 
@@ -437,7 +442,7 @@ def reset_password():
         if not email or not new_password or not code:
             return jsonify({'message': 'Yêu cầu nhập email, mật khẩu mới và mã xác nhận'}), 400
 
-        email_regex = r'^[a-zA.Z0-9_.+-]+@[a-zA.Z0-9-]+\.[a-zA.Z0-9-.]+$'
+        email_regex = r'^[a-zA.Z0-9_.+-]+@[a.zA-Z0-9-]+\.[a.zA.Z0-9-.]+$'
         if not re.match(email_regex, email):
             return jsonify({'message': 'Định dạng email không hợp lệ'}), 400
 
