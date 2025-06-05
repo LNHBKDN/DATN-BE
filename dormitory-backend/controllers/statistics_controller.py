@@ -687,7 +687,7 @@ def get_occupancy_rate_stats():
             'data': response
         }), 200
     except Exception as e:
-        logger.error(f"Error in get_occupancy_rate_stats: {str(e)}")
+        logger.error(f"ожалуй: Error in get_occupancy_rate_stats: {str(e)}")
         return jsonify({
             'status': 'error',
             'message': str(e)
@@ -899,12 +899,23 @@ def get_user_summary():
         area_id = request.args.get('area_id', type=int)
         
         if not year:
+            logger.error("Year parameter is required but not provided")
             return jsonify({
                 'status': 'error',
                 'message': 'Year is required'
             }), 400
 
         logger.info(f"Fetching user summary for year={year}, area_id={area_id}")
+
+        # Validate area_id if provided, without is_deleted filter
+        if area_id:
+            area_exists = Area.query.filter_by(area_id=area_id).first()
+            if not area_exists:
+                logger.error(f"Invalid area_id={area_id}: Area does not exist")
+                return jsonify({
+                    'status': 'error',
+                    'message': f'Invalid area_id: {area_id}'
+                }), 400
 
         query = (
             db.session.query(
@@ -928,15 +939,19 @@ def get_user_summary():
             }
             month_result = next((r for r in results if r.month == month), None)
             if month_result:
-                month_data['total_users'] = month_result.total_users
+                # Ensure total_users is an integer
+                total_users = int(month_result.total_users) if month_result.total_users is not None else 0
+                month_data['total_users'] = total_users
             response.append(month_data)
+
+        logger.debug(f"User summary response: {response}")
 
         return jsonify({
             'status': 'success',
             'data': response
         }), 200
     except Exception as e:
-        logger.error(f"Error in get_user_summary: {str(e)}")
+        logger.error(f"Error in get_user_summary for year={year}, area_id={area_id}: {str(e)}", exc_info=True)
         return jsonify({
             'status': 'error',
             'message': f'Error processing data: {str(e)}'
@@ -971,4 +986,92 @@ def manual_snapshot():
         return jsonify({
             'status': 'error',
             'message': f'Error triggering snapshots: {str(e)}'
+        }), 500
+
+@statistics_bp.route('/api/statistics/rooms/fill-rate', methods=['GET'])
+@admin_required()
+def get_room_fill_rate_stats():
+    """Get fill rate statistics for rooms, including capacity, current occupants, and fill rate per room and area."""
+    try:
+        area_id = request.args.get('area_id', type=int)
+        room_id = request.args.get('room_id', type=int)
+
+        logger.info(f"Fetching room fill rate stats, area_id={area_id}, room_id={room_id}")
+
+        query = (
+            db.session.query(
+                Area.area_id,
+                Area.name.label('area_name'),
+                Room.room_id,
+                Room.name.label('room_name'),
+                Room.capacity,
+                Room.current_person_number
+            )
+            .join(Area, Area.area_id == Room.area_id)
+            .filter(Room.is_deleted == False)
+        )
+
+        if area_id:
+            query = query.filter(Area.area_id == area_id)
+        if room_id:
+            query = query.filter(Room.room_id == room_id)
+
+        results = query.all()
+
+        if room_id:
+            response = [
+                {
+                    'area_id': row.area_id,
+                    'area_name': row.area_name,
+                    'room_id': row.room_id,
+                    'room_name': row.room_name,
+                    'capacity': row.capacity,
+                    'current_person_number': row.current_person_number,
+                    'fill_rate': round((row.current_person_number / row.capacity * 100), 2) if row.capacity > 0 else 0
+                } for row in results
+            ]
+        else:
+            response = {}
+            total_capacity = {}
+            total_users = {}
+
+            for row in results:
+                area_id = row.area_id
+                if area_id not in response:
+                    response[area_id] = {
+                        'area_id': area_id,
+                        'area_name': row.area_name,
+                        'total_capacity': 0,
+                        'total_users': 0,
+                        'area_fill_rate': 0,
+                        'rooms': {}
+                    }
+                    total_capacity[area_id] = 0
+                    total_users[area_id] = 0
+
+                response[area_id]['rooms'][row.room_id] = {
+                    'room_name': row.room_name,
+                    'capacity': row.capacity,
+                    'current_person_number': row.current_person_number,
+                    'fill_rate': round((row.current_person_number / row.capacity * 100), 2) if row.capacity > 0 else 0
+                }
+                total_capacity[area_id] += row.capacity
+                total_users[area_id] += row.current_person_number
+
+            for area_id in response:
+                response[area_id]['total_capacity'] = total_capacity[area_id]
+                response[area_id]['total_users'] = total_users[area_id]
+                response[area_id]['area_fill_rate'] = round((total_users[area_id] / total_capacity[area_id] * 100), 2) if total_capacity[area_id] > 0 else 0
+
+            response = list(response.values())
+
+        return jsonify({
+            'status': 'success',
+            'data': response
+        }), 200
+    except Exception as e:
+        logger.error(f"Error in get_room_fill_rate_stats: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': f'Error processing data: {str(e)}'
         }), 500
