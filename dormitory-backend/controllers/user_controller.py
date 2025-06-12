@@ -309,13 +309,20 @@ def update_user(user_id):
 @user_bp.route('/admin/users/<int:user_id>', methods=['DELETE'])
 @admin_required()
 def delete_user(user_id):
-    """Soft delete người dùng và thu hồi tất cả refresh token."""
+    """Soft delete người dùng và thu hồi tất cả refresh token. Không cho xoá nếu còn hợp đồng hiệu lực."""
     try:
         logger.debug(f"Admin deleting user_id={user_id}")
         user = User.query.filter_by(user_id=user_id, is_deleted=False).first()
         if not user:
             logger.warning(f"User not found: user_id={user_id}")
             return jsonify({'message': 'Không tìm thấy người dùng'}), 404
+
+        # Kiểm tra hợp đồng còn hiệu lực
+        from models.contract import Contract
+        active_contract = Contract.query.filter_by(user_id=user_id, is_deleted=False, calculated_status='ACTIVE').first()
+        if active_contract:
+            logger.warning(f"User {user_id} still has an active contract, cannot delete.")
+            return jsonify({'message': 'Không thể xoá người dùng khi còn hợp đồng hiệu lực'}), 400
 
         # Revoke all refresh tokens for this user
         refresh_tokens = RefreshToken.query.filter_by(user_id=user_id, type='USER', revoked_at=None).all()

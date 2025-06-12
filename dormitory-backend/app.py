@@ -13,6 +13,7 @@ from celery import Celery
 from models.refresh_tokens import RefreshToken
 import firebase_admin
 from firebase_admin import credentials, messaging
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 # Load biến môi trường từ file .env
 dotenv_path = Path(__file__).resolve().parent / '.env'
@@ -337,6 +338,8 @@ def check_if_token_revoked(jwt_header, jwt_payload):
     except Exception as e:
         logger.error("Lỗi khi kiểm tra blacklist token: %s", str(e))
         return True
+
+app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 
 if __name__ == '__main__':
     if os.getenv('FLASK_ENV') == 'development':

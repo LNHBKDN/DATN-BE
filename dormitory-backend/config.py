@@ -14,7 +14,7 @@ class Config:
         self.JWT_SECRET_KEY = os.getenv('JWT_SECRET_KEY')
         if not self.JWT_SECRET_KEY:
             raise ValueError("JWT_SECRET_KEY is not set in environment variables")
-        self.JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=1)
+        self.JWT_ACCESS_TOKEN_EXPIRES = timedelta(hours=24)
         self.JWT_REFRESH_TOKEN_EXPIRES = timedelta(days=30)
         self.JWT_BLACKLIST_ENABLED = True
         self.JWT_BLACKLIST_TOKEN_CHECKS = ['access', 'refresh']
