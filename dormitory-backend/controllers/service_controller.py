@@ -112,9 +112,27 @@ def delete_service(service_id):
     if not service:
         return jsonify({'message': 'Không tìm thấy dịch vụ'}), 404
 
+    # Kiểm tra còn mức giá liên quan không
     related_rates = ServiceRate.query.filter_by(service_id=service_id).first()
     if related_rates:
         return jsonify({'message': 'Không thể xóa dịch vụ vì có mức giá liên quan. Vui lòng xóa các mức giá trước.'}), 400
+
+    # Kiểm tra còn bill detail nào của dịch vụ này mà chưa tạo hóa đơn tháng không
+    from models.bill_detail import BillDetail
+    from models.monthly_bill import MonthlyBill
+
+    # Lấy tất cả rate_id của service này
+    rate_ids = [rate.rate_id for rate in ServiceRate.query.filter_by(service_id=service_id).all()]
+    if rate_ids:
+        # Tìm bill detail chưa được liên kết với monthly bill
+        unlinked_bill_detail = BillDetail.query.filter(
+            BillDetail.rate_id.in_(rate_ids),
+            ~BillDetail.detail_id.in_(
+                db.session.query(MonthlyBill.detail_id)
+            )
+        ).first()
+        if unlinked_bill_detail:
+            return jsonify({'message': 'Không thể xóa dịch vụ vì còn chỉ số dịch vụ chưa tạo hóa đơn tháng'}), 400
 
     try:
         db.session.delete(service)
