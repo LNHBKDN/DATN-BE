@@ -162,9 +162,12 @@ def delete_area(area_id):
     area = Area.query.get(area_id)
     if not area:
         return jsonify({'message': 'Không tìm thấy khu vực'}), 404
-    if area.rooms:
-        return jsonify({'message': 'Không thể xóa khu vực vì có phòng liên kết'}), 400
-    
+
+    # Kiểm tra còn phòng nào thuộc khu vực này không (kể cả đã bị xóa mềm hay chưa)
+    room_count = Room.query.filter_by(area_id=area_id, is_deleted=False).count()
+    if room_count > 0:
+        return jsonify({'message': 'Không thể xóa khu vực vì vẫn còn phòng thuộc khu vực này'}), 400
+
     db.session.delete(area)
     try:
         db.session.commit()
