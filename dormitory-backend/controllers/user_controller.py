@@ -317,9 +317,9 @@ def delete_user(user_id):
             logger.warning(f"User not found: user_id={user_id}")
             return jsonify({'message': 'Không tìm thấy người dùng'}), 404
 
-        # Kiểm tra hợp đồng còn hiệu lực
+        # Kiểm tra hợp đồng còn hiệu lực (chỉ cần có contract ACTIVE là không cho xoá)
         from models.contract import Contract
-        active_contract = Contract.query.filter_by(user_id=user_id, is_deleted=False, calculated_status='ACTIVE').first()
+        active_contract = Contract.query.filter_by(user_id=user_id, status='ACTIVE').first()
         if active_contract:
             logger.warning(f"User {user_id} still has an active contract, cannot delete.")
             return jsonify({'message': 'Không thể xoá người dùng khi còn hợp đồng hiệu lực'}), 400
