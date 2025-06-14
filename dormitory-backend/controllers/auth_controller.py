@@ -172,7 +172,7 @@ def user_login():
         if not password:
             return jsonify({'message': 'Yêu cầu nhập mật khẩu'}), 400
 
-        email_regex = r'^[a-zA-Z0-9_.+-]+@[a-zA.Z0-9-]+\.[a-zA.Z0-9-.]+$'
+        email_regex = r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$'
         if not re.match(email_regex, email):
             return jsonify({'message': 'Định dạng email không hợp lệ'}), 400
         
@@ -370,7 +370,7 @@ def forgot_password():
         if not email:
             return jsonify({'message': 'Yêu cầu nhập email'}), 400
 
-        email_regex = r'^[a-zA.Z0-9_.+-]+@[a.zA-Z0-9-]+\.[a.zA.Z0-9-.]+$'
+        email_regex = r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$'
         if not re.match(email_regex, email):
             return jsonify({'message': 'Định dạng email không hợp lệ'}), 400
 
@@ -442,7 +442,7 @@ def reset_password():
         if not email or not new_password or not code:
             return jsonify({'message': 'Yêu cầu nhập email, mật khẩu mới và mã xác nhận'}), 400
 
-        email_regex = r'^[a-zA.Z0-9_.+-]+@[a.zA-Z0-9-]+\.[a.zA.Z0-9-.]+$'
+        email_regex = r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$'
         if not re.match(email_regex, email):
             return jsonify({'message': 'Định dạng email không hợp lệ'}), 400
 
