@@ -10,6 +10,7 @@ from models.service_rate import ServiceRate
 from models.contract import Contract
 from models.notification import Notification
 from models.notification_recipient import NotificationRecipient
+from models.payment_transaction import PaymentTransaction
 from controllers.auth_controller import admin_required, user_required
 from datetime import datetime, date
 from dateutil.relativedelta import relativedelta
@@ -824,6 +825,9 @@ def delete_monthly_bill(bill_id):
         if monthly_bill.payment_status == 'PAID':
             logging.error(f"Cannot delete paid bill {bill_id}")
             return jsonify({'message': 'Không thể xóa hóa đơn đã thanh toán'}), 409
+
+        # Xoá các payment transaction có bill_id trùng và trạng thái PENDING
+        PaymentTransaction.query.filter_by(bill_id=bill_id, status='PENDING').delete()
 
         db.session.delete(monthly_bill)
         db.session.commit()

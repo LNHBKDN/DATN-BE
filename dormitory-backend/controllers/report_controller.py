@@ -103,9 +103,10 @@ def get_all_reports():
         user_id = request.args.get('user_id', type=int)
         room_id = request.args.get('room_id', type=int)
         status = request.args.get('status', type=str)
+        report_type_id = request.args.get('report_type_id', type=int)  # Thêm dòng này
 
-        logger.info("Lấy danh sách báo cáo với page=%s, limit=%s, user_id=%s, room_id=%s, status=%s", 
-                    page, limit, user_id, room_id, status)
+        logger.info("Lấy danh sách báo cáo với page=%s, limit=%s, user_id=%s, room_id=%s, status=%s, report_type_id=%s", 
+                    page, limit, user_id, room_id, status, report_type_id)
 
         if page < 1 or limit < 1:
             logger.warning("Tham số page=%s hoặc limit=%s không hợp lệ", page, limit)
@@ -134,6 +135,9 @@ def get_all_reports():
             query = query.filter_by(room_id=room_id)
         if status:
             query = query.filter_by(status=status)
+        # Thêm điều kiện lọc theo report_type_id
+        if report_type_id:
+            query = query.filter_by(report_type_id=report_type_id)
 
         reports = query.paginate(page=page, per_page=limit, error_out=False)
         if not reports.items and page > 1:

@@ -455,7 +455,11 @@ def reset_password():
 
         admin = Admin.query.filter_by(email=email).first()
         if admin and admin.reset_token:
-            if not admin.reset_token_expiry or admin.reset_token_expiry < datetime.now(timezone.utc):
+            # Đảm bảo reset_token_expiry là offset-aware
+            expiry = admin.reset_token_expiry
+            if expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=timezone.utc)
+            if not expiry or expiry < datetime.now(timezone.utc):
                 admin.reset_attempts = 0
                 admin.reset_token = None
                 admin.reset_token_expiry = None
@@ -504,7 +508,10 @@ def reset_password():
 
         user = User.query.filter_by(email=email).first()
         if user and user.reset_token:
-            if not user.reset_token_expiry or user.reset_token_expiry < datetime.now(timezone.utc):
+            expiry = user.reset_token_expiry
+            if expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=timezone.utc)
+            if not expiry or expiry < datetime.now(timezone.utc):
                 user.reset_attempts = 0
                 user.reset_token = None
                 user.reset_token_expiry = None
