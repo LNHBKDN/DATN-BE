@@ -2,7 +2,7 @@ from extensions import db
 from datetime import datetime
 
 class ReportImage(db.Model):
-    __tablename__ = 'reportImage'
+    __tablename__ = 'reportimage'
     image_id = db.Column(db.BigInteger, primary_key=True, autoincrement=True)
     report_id = db.Column(db.BigInteger, db.ForeignKey('reports.report_id'), nullable=True)  # Xóa ondelete='CASCADE', đặt nullable=True
     image_url = db.Column(db.String(512), nullable=False)

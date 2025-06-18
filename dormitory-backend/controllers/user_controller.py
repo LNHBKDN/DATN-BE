@@ -124,16 +124,28 @@ def get_all_users():
         fullname = request.args.get('fullname', type=str)
         phone = request.args.get('phone', type=str)
         class_name = request.args.get('class_name', type=str)
+        keyword = request.args.get('keyword', type=str)
 
         query = User.query.filter_by(is_deleted=False)
-        if email:
-            query = query.filter(User.email.ilike(f'%{email}%'))
-        if fullname:
-            query = query.filter(User.fullname.ilike(f'%{fullname}%'))
-        if phone:
-            query = query.filter(User.phone.ilike(f'%{phone}%'))
-        if class_name:
-            query = query.filter(User.class_name.ilike(f'%{class_name}%'))
+        if keyword:
+            keyword = keyword.strip()
+            query = query.filter(
+                db.or_(
+                    User.email.ilike(f'%{keyword}%'),
+                    User.fullname.ilike(f'%{keyword}%'),
+                    User.phone.ilike(f'%{keyword}%'),
+                    User.class_name.ilike(f'%{keyword}%')
+                )
+            )
+        else:
+            if email:
+                query = query.filter(User.email.ilike(f'%{email}%'))
+            if fullname:
+                query = query.filter(User.fullname.ilike(f'%{fullname}%'))
+            if phone:
+                query = query.filter(User.phone.ilike(f'%{phone}%'))
+            if class_name:
+                query = query.filter(User.class_name.ilike(f'%{class_name}%'))
 
         users = query.paginate(page=page, per_page=limit)
         return jsonify({

@@ -464,22 +464,108 @@ def create_monthly_bills_bulk():
 @monthly_bill_bp.route('/admin/bill-details', methods=['GET'])
 @admin_required()
 def get_all_bill_details():
-    logging.debug("GET /admin/bill-details")
+    logging.debug("GET /admin/bill-details with params: %s", request.args)
     try:
-        bill_details = BillDetail.query.all()
-        # Fetch all rooms in one query
-        rooms = Room.query.all()
-        room_dict = {room.room_id: room.name for room in rooms}
-        
-        # Serialize bill details and include room_name
+        page = request.args.get('page', 1, type=int)
+        limit = request.args.get('limit', 10, type=int)
+        month = request.args.get('month', type=str)  # yyyy-MM
+        area = request.args.get('area', type=str)
+        service = request.args.get('service', type=str)
+        search = request.args.get('search', type=str)
+        submitted = request.args.get('submissionStatus', type=str)  # SUBMITTED/NOT_SUBMITTED
+        payment_status = request.args.get('paymentStatus', type=str)  # PAID/NOT_PAID
+
+        if not month:
+            return jsonify({'message': 'Vui lòng truyền tham số month (yyyy-MM)'}), 400
+        try:
+            bill_month_date = datetime.strptime(month + '-01', '%Y-%m-%d').date()
+        except ValueError:
+            return jsonify({'message': 'Định dạng tháng không hợp lệ (yyyy-MM)'}), 400
+
+        # Lấy danh sách phòng với filter nâng cao
+        room_query = Room.query.filter_by(is_deleted=False)
+        if area:
+            room_query = room_query.join(Room.area).filter_by(name=area)
+        if search:
+            room_query = room_query.filter(Room.name.ilike(f'%{search}%'))
+        rooms = room_query.all()
+        room_ids = [room.room_id for room in rooms]
+
+        # Lấy tất cả BillDetail của các phòng trong tháng này
+        bill_details = BillDetail.query.filter(
+            BillDetail.room_id.in_(room_ids),
+            BillDetail.bill_month == bill_month_date
+        ).all()
+        bill_detail_map = {(bd.room_id, bd.rate_id): bd for bd in bill_details}
+
+        # Lấy danh sách dịch vụ với filter
+        service_query = Service.query
+        if service:
+            service_query = service_query.filter(Service.name.ilike(f'%{service}%'))
+        services = service_query.all()
+
         result = []
-        for detail in bill_details:
-            detail_dict = detail.to_dict()
-            detail_dict['room_name'] = room_dict.get(detail.room_id, 'N/A')
-            result.append(detail_dict)
-            
-        logging.debug(f"Returning {len(result)} bill details")
-        return jsonify(result), 200
+        for room in rooms:
+            for svc in services:
+                # Kiểm tra đã có BillDetail cho phòng này, dịch vụ này, tháng này chưa
+                rate = ServiceRate.query.filter(
+                    ServiceRate.service_id == svc.service_id,
+                    ServiceRate.effective_date <= bill_month_date
+                ).order_by(ServiceRate.effective_date.desc()).first()
+                if not rate:
+                    continue
+                bd = bill_detail_map.get((room.room_id, rate.rate_id))
+                if bd:
+                    detail_dict = bd.to_dict()
+                    detail_dict['submitted'] = True
+                    # Kiểm tra trạng thái thanh toán
+                    monthly_bill = MonthlyBill.query.filter_by(detail_id=bd.detail_id).first()
+                    if monthly_bill and monthly_bill.payment_status == 'PAID':
+                        detail_dict['payment_status'] = 'PAID'
+                    else:
+                        detail_dict['payment_status'] = 'NOT_PAID'
+                else:
+                    detail_dict = {
+                        'detail_id': None,
+                        'room_id': room.room_id,
+                        'room_name': room.name,
+                        'bill_month': bill_month_date.isoformat(),
+                        'service_id': svc.service_id,
+                        'service_name': svc.name,
+                        'submitted': False,
+                        'payment_status': 'NOT_PAID'
+                    }
+                detail_dict['area_name'] = room.area.name if room.area else None
+                result.append(detail_dict)
+
+        # Filter theo trạng thái gửi chỉ số (submitted)
+        if submitted:
+            submitted = submitted.upper()
+            if submitted == 'SUBMITTED':
+                result = [item for item in result if item['submitted']]
+            elif submitted == 'NOT_SUBMITTED':
+                result = [item for item in result if not item['submitted']]
+
+        # Filter theo trạng thái thanh toán (payment_status)
+        if payment_status:
+            payment_status = payment_status.upper()
+            if payment_status == 'PAID':
+                result = [item for item in result if item['payment_status'] == 'PAID']
+            elif payment_status == 'NOT_PAID':
+                result = [item for item in result if item['payment_status'] == 'NOT_PAID']
+
+        # Phân trang thủ công
+        total = len(result)
+        start = (page - 1) * limit
+        end = start + limit
+        paginated = result[start:end]
+
+        return jsonify({
+            'bill_details': paginated,
+            'total': total,
+            'pages': (total + limit - 1) // limit,
+            'current_page': page
+        }), 200
 
     except Exception as e:
         logging.error(f"Error in get_all_bill_details: {str(e)}")
@@ -623,11 +709,83 @@ def delete_bill_detail(detail_id):
 @monthly_bill_bp.route('/admin/monthly-bills', methods=['GET'])
 @admin_required()
 def get_all_monthly_bills():
-    logging.debug("GET /admin/monthly-bills")
+    logging.debug("GET /admin/monthly-bills with params: %s", request.args)
     try:
-        monthly_bills = MonthlyBill.query.all()
-        logging.debug(f"Returning {len(monthly_bills)} monthly bills")
-        return jsonify([bill.to_dict() for bill in monthly_bills]), 200
+        page = request.args.get('page', 1, type=int)
+        limit = request.args.get('limit', 10, type=int)
+        area = request.args.get('area', type=str)
+        payment_status = request.args.get('paymentStatus', type=str)
+        service = request.args.get('service', type=str)
+        month = request.args.get('month', type=str)  # yyyy-MM
+        bill_status = request.args.get('billStatus', type=str)  # CREATED/NOT_CREATED
+        search = request.args.get('search', type=str)
+
+        query = MonthlyBill.query.join(Room, MonthlyBill.room_id == Room.room_id) \
+                                .join(User, MonthlyBill.user_id == User.user_id) \
+                                .join(BillDetail, MonthlyBill.detail_id == BillDetail.detail_id) \
+                                .join(ServiceRate, BillDetail.rate_id == ServiceRate.rate_id) \
+                                .join(Service, ServiceRate.service_id == Service.service_id)
+
+        # Filter theo khu vực
+        if area:
+            query = query.join(Room.area).filter(Room.area.has(name=area))
+
+        # Filter theo trạng thái thanh toán
+        if payment_status:
+            payment_status = payment_status.upper()
+            if payment_status == 'NOT_PAID':
+                query = query.filter(MonthlyBill.payment_status != 'PAID')
+            else:
+                query = query.filter(MonthlyBill.payment_status == payment_status)
+
+        # Filter theo dịch vụ
+        if service:
+            query = query.filter(Service.name.ilike(f'%{service}%'))
+
+        # Filter theo tháng hóa đơn
+        if month:
+            try:
+                bill_month_date = datetime.strptime(month + '-01', '%Y-%m-%d').date()
+                query = query.filter(MonthlyBill.bill_month == bill_month_date)
+            except ValueError:
+                return jsonify({'message': 'Định dạng tháng không hợp lệ (yyyy-MM)'}), 400
+
+        # Filter theo trạng thái hóa đơn (CREATED/NOT_CREATED)
+        if bill_status:
+            bill_status = bill_status.upper()
+            if bill_status == 'CREATED':
+                pass  # Đã join MonthlyBill nên mặc định là CREATED
+            elif bill_status == 'NOT_CREATED':
+                # Lấy các BillDetail chưa có MonthlyBill
+                subquery = db.session.query(MonthlyBill.detail_id)
+                bill_details = BillDetail.query.filter(~BillDetail.detail_id.in_(subquery))
+                # Có thể trả về riêng nếu cần
+                return jsonify({
+                    'not_created_bill_details': [bd.to_dict() for bd in bill_details]
+                }), 200
+
+        # Filter search theo tên phòng, tên user, email user
+        if search:
+            search = search.strip()
+            query = query.filter(
+                db.or_(
+                    Room.name.ilike(f'%{search}%'),
+                    User.fullname.ilike(f'%{search}%'),
+                    User.email.ilike(f'%{search}%')
+                )
+            )
+
+        total = query.count()
+        bills = query.order_by(MonthlyBill.created_at.desc()) \
+                     .offset((page - 1) * limit).limit(limit).all()
+
+        logging.debug(f"Returning {len(bills)} monthly bills (filtered)")
+        return jsonify({
+            'bills': [bill.to_dict() for bill in bills] if bills else [],
+            'total': total,
+            'pages': (total + limit - 1) // limit,
+            'current_page': page
+        }), 200
 
     except Exception as e:
         logging.error(f"Error in get_all_monthly_bills: {str(e)}")

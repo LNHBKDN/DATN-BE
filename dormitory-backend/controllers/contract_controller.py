@@ -79,6 +79,8 @@ def get_all_contracts():
         limit = request.args.get('limit', 10, type=int)
         user_id = request.args.get('user_id', type=int)
         email = request.args.get('email', type=str)
+        fullname = request.args.get('fullname', type=str)  # Thêm dòng này nếu muốn filter riêng fullname
+        keyword = request.args.get('keyword', type=str)    # Thêm dòng này nếu muốn filter chung
         room_id = request.args.get('room_id', type=int)
         status = request.args.get('status', type=str)
         start_date = request.args.get('start_date', type=str)
@@ -88,6 +90,8 @@ def get_all_contracts():
         filter_params = {
             'user_id': user_id,
             'email': email,
+            'fullname': fullname,
+            'keyword': keyword,
             'room_id': room_id,
             'status': status,
             'start_date': start_date,
@@ -105,9 +109,20 @@ def get_all_contracts():
 
         query = Contract.query
 
-        if 'user_id' in provided_filters and 'email' in provided_filters:
-            return jsonify({'message': 'Không thể cung cấp cả user_id và email cùng lúc'}), 400
-        elif 'email' in provided_filters:
+        # Join với User nếu tìm kiếm theo tên/email/keyword
+        if 'keyword' in provided_filters and keyword:
+            keyword = keyword.strip()
+            query = query.join(User, Contract.user_id == User.user_id).filter(
+                db.or_(
+                    User.fullname.ilike(f'%{keyword}%'),
+                    User.email.ilike(f'%{keyword}%')
+                )
+            )
+        elif 'fullname' in provided_filters and fullname:
+            query = query.join(User, Contract.user_id == User.user_id).filter(
+                User.fullname.ilike(f'%{fullname.strip()}%')
+            )
+        elif 'email' in provided_filters and email:
             user = User.query.filter_by(email=email).first()
             if not user:
                 return jsonify({'message': 'Không tìm thấy người dùng với email này'}), 404
