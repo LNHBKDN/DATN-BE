@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify, current_app
+from flask import Blueprint, request, jsonify, current_app, send_file
 from extensions import db
 from models.room import Room
 from models.contract import Contract
@@ -16,6 +16,8 @@ from datetime import datetime
 import uuid
 from unidecode import unidecode
 import re
+from io import BytesIO
+import openpyxl
 
 # Thiết lập logging
 logging.basicConfig(level=logging.INFO)
@@ -76,8 +78,35 @@ def get_rooms():
         if not update_current_person_number():
             return jsonify({'message': 'Lỗi khi cập nhật số lượng người trong phòng'}), 500
 
+        # Thêm xử lý tìm kiếm user
+        search_user = request.args.get('search_user', '').strip()
+        if search_user:
+            user = User.query.filter(
+                (User.fullname.ilike(f'%{search_user}%')) |
+                (User.email.ilike(f'%{search_user}%')) |
+                (User.student_code.ilike(f'%{search_user}%'))
+            ).first()
+            if not user:
+                return jsonify({'rooms': [], 'total': 0, 'pages': 0, 'current_page': 1}), 200
+
+            contract = Contract.query.filter_by(user_id=user.user_id, status='ACTIVE', is_deleted=False).first()
+            if not contract:
+                return jsonify({'rooms': [], 'total': 0, 'pages': 0, 'current_page': 1}), 200
+
+            room = Room.query.filter_by(room_id=contract.room_id, is_deleted=False).first()
+            if not room:
+                return jsonify({'rooms': [], 'total': 0, 'pages': 0, 'current_page': 1}), 200
+
+            return jsonify({
+                'rooms': [room.to_dict()],
+                'total': 1,
+                'pages': 1,
+                'current_page': 1
+            }), 200
+
+   
         page = request.args.get('page', 1, type=int)
-        limit = request.args.get('limit', 10, type=int)
+        limit = request.args.get('limit', 12, type=int)
         min_capacity = request.args.get('min_capacity', type=int)
         max_capacity = request.args.get('max_capacity', type=int)
         min_price = request.args.get('min_price', type=float)
@@ -465,14 +494,58 @@ def get_users_in_room(room_id):
         room = Room.query.get(room_id)
         if not room:
             return jsonify({'message': 'Không tìm thấy phòng'}), 404
-        
+        # Chỉ lấy user có hợp đồng ACTIVE ở phòng này
         contracts = Contract.query.filter_by(room_id=room_id, status='ACTIVE').all()
         user_ids = [contract.user_id for contract in contracts]
-        users = User.query.filter(User.user_id.in_(user_ids)).all()
+        users = User.query.filter(User.user_id.in_(user_ids)).all() if user_ids else []
         return jsonify([user.to_dict() for user in users]), 200
     except SQLAlchemyError as e:
         logger.error(f"Database error fetching users in room {room_id}: {str(e)}")
         return jsonify({'message': 'Lỗi database'}), 500
+
+@room_bp.route('/admin/rooms/<int:room_id>/users/export', methods=['GET'])
+@admin_required()
+def export_users_in_room(room_id):
+    try:
+        room = Room.query.get(room_id)
+        if not room:
+            return jsonify({'message': 'Không tìm thấy phòng'}), 404
+        contracts = Contract.query.filter_by(room_id=room_id, status='ACTIVE').all()
+        user_ids = [contract.user_id for contract in contracts]
+        users = User.query.filter(User.user_id.in_(user_ids)).all()
+        # Tạo workbook Excel
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Danh sách sinh viên"
+        # Header
+        ws.append(['ID', 'Họ tên', 'Email', 'MSSV', 'SĐT', 'Quê quán'])
+        # Data
+        for user in users:
+            ws.append([
+                user.user_id,
+                user.fullname,
+                user.email,
+                user.student_code,
+                user.phone,
+                user.hometown
+            ])
+        # Lưu vào bộ nhớ và trả về file
+        output = BytesIO()
+        wb.save(output)
+        output.seek(0)
+        filename = f"users_in_room_{room_id}.xlsx"
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name=filename,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+    except SQLAlchemyError as e:
+        logger.error(f"Database error exporting users in room {room_id}: {str(e)}")
+        return jsonify({'message': 'Lỗi database'}), 500
+    except Exception as e:
+        logger.error(f"Unexpected error exporting users in room {room_id}: {str(e)}")
+        return jsonify({'message': 'Lỗi không xác định'}), 500
 
 # Xóa phòng (Admin)
 @room_bp.route('/admin/rooms/<int:room_id>', methods=['DELETE'])
@@ -524,3 +597,19 @@ def delete_room(room_id):
         db.session.rollback()
         logger.error(f"Unexpected error deleting room: room_id={room_id}, error={str(e)}")
         return jsonify({'message': 'Lỗi server không xác định', 'error': str(e)}), 500
+
+@room_bp.route('/rooms-with-students', methods=['GET'])
+@admin_required()
+def get_rooms_with_students():
+    rooms = Room.query.filter_by(is_deleted=False).all()
+    result = []
+    for room in rooms:
+        # Lấy các hợp đồng ACTIVE của phòng này
+        active_contracts = [c for c in room.contracts if c.status == 'ACTIVE' and not c.is_deleted]
+        students = [c.user.to_dict() for c in active_contracts if c.user]
+        room_dict = room.to_dict()
+        room_dict['students'] = students
+        result.append(room_dict)
+    return jsonify(result), 200
+
+

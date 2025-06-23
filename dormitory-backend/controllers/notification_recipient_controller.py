@@ -16,9 +16,8 @@ notification_recipient_bp = Blueprint('notification_recipient', __name__)
 # GetPersonalNotifications / GetMyNotifications (User)
 @notification_recipient_bp.route('/me/notifications', methods=['GET'])
 @user_required()
-def get_user_notifications():
-    identity = get_jwt_identity()
-    user_id = int(identity)
+def get_my_notifications():
+    user_id = get_jwt_identity()
     logger.info(f"Fetching notifications for user_id: {user_id}")
     page = request.args.get('page', 1, type=int)
     limit = request.args.get('limit', 50, type=int)

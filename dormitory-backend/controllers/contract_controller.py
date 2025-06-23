@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, render_template, send_file
 from flask_jwt_extended import jwt_required, get_jwt_identity, get_jwt
 from flask import current_app
 from extensions import db
@@ -17,6 +17,9 @@ from json import JSONEncoder
 from dateutil.parser import parse as parse_date
 from sqlalchemy.sql import func
 import pendulum
+import pdfkit
+from io import BytesIO
+from weasyprint import HTML
 
 from utils.fcm import send_fcm_notification
 
@@ -242,19 +245,19 @@ def create_contract():
         if not data:
             return jsonify({'message': 'Dữ liệu JSON không hợp lệ'}), 400
 
-        email = data.get('email')
+        student_code = data.get('student_code')
         room_name = data.get('room_name')
         area_id = data.get('area_id')
         start_date = data.get('start_date')
         end_date = data.get('end_date')
         contract_type = data.get('contract_type')
 
-        if not all([email, room_name, area_id, start_date, end_date, contract_type]):
-            return jsonify({'message': 'Yêu cầu email, room_name, area_id, start_date, end_date và contract_type'}), 400
+        if not all([student_code, room_name, area_id, start_date, end_date, contract_type]):
+            return jsonify({'message': 'Yêu cầu student_code, room_name, area_id, start_date, end_date và contract_type'}), 400
 
-        user = User.query.filter_by(email=email).first()
+        user = User.query.filter_by(student_code=student_code).first()
         if not user:
-            return jsonify({'message': 'Không tìm thấy người dùng với email này'}), 404
+            return jsonify({'message': 'Không tìm thấy người dùng với mã số sinh viên này'}), 404
         user_id = user.user_id
 
         room = Room.query.filter_by(name=room_name, area_id=area_id).first()
@@ -354,7 +357,6 @@ def create_contract():
         return jsonify(contract.to_dict()), 201
     except IntegrityError:
         db.session.rollback()
-        logger.error(f"Failed to create contract for email={email}, room_name={room_name}")
         return jsonify({'message': 'Xung đột khi tạo hợp đồng, vui lòng thử lại'}), 409
     except ValueError as e:
         db.session.rollback()
@@ -588,3 +590,31 @@ def manual_update_contract_status():
     except Exception as e:
         logger.error(f'Error in manual_update_contract_status: {str(e)}')
         return jsonify({'message': 'Lỗi khi cập nhật trạng thái hợp đồng', 'error': str(e)}), 500
+
+@contract_bp.route('/admin/contracts/<int:contract_id>/export', methods=['GET'])
+@admin_required()
+def export_contract_pdf(contract_id):
+    try:
+        contract = Contract.query.get(contract_id)
+        if not contract:
+            return jsonify({'message': 'Không tìm thấy hợp đồng'}), 404
+
+        contract_data = contract.to_dict()
+        # Nếu cần, xử lý thêm dữ liệu cho contract_data ở đây
+
+        # Render HTML từ template
+        html = render_template('contract/contract_template.html', contract=contract_data)
+
+        # Tạo PDF từ HTML
+        pdf = HTML(string=html).write_pdf()
+
+        # Trả về file PDF
+        return send_file(
+            BytesIO(pdf),
+            as_attachment=True,
+            download_name=f"contract_{contract_id}.pdf",
+            mimetype='application/pdf'
+        )
+    except Exception as e:
+        logger.error(f"Error exporting contract {contract_id} to PDF: {str(e)}")
+        return jsonify({'message': 'Lỗi khi xuất hợp đồng ra PDF', 'error': str(e)}), 500

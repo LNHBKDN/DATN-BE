@@ -11,6 +11,7 @@ from models.contract import Contract
 from models.notification import Notification
 from models.notification_recipient import NotificationRecipient
 from models.payment_transaction import PaymentTransaction
+from models.area import Area
 from controllers.auth_controller import admin_required, user_required
 from datetime import datetime, date
 from dateutil.relativedelta import relativedelta
@@ -1122,3 +1123,272 @@ def delete_paid_bills():
     except Exception as e:
         logging.error(f"Error in delete_paid_bills: {str(e)}")
         return jsonify({'message': 'Lỗi khi xóa hóa đơn', 'error': str(e)}), 500
+
+@monthly_bill_bp.route('/bill-details/room/<int:room_id>', methods=['GET'])
+@jwt_required()
+def get_room_bill_details(room_id):
+    year = request.args.get('year', type=int)
+    service_id = request.args.get('service_id', type=int)
+    if not year or not service_id:
+        return jsonify({'message': 'Thiếu tham số year hoặc service_id'}), 400
+
+    identity = get_jwt_identity()
+    try:
+        if isinstance(identity, dict):
+            user_id = identity['id']
+            user_type = identity.get('type', 'USER')
+        else:
+            user_id = int(identity)
+            user_type = get_jwt().get('type', 'USER')
+    except (TypeError, ValueError) as e:
+        return jsonify({'message': 'Token không hợp lệ', 'error': str(e)}), 401
+
+    room = Room.query.get(room_id)
+    if not room:
+        return jsonify({'message': 'Không tìm thấy phòng'}), 404
+
+    # Nếu là admin, không cần kiểm tra quyền truy cập
+    if user_type != 'ADMIN':
+        user = User.query.get(user_id)
+        if not user:
+            return jsonify({'message': 'Không tìm thấy người dùng'}), 404
+            
+        active_contract = Contract.query.filter_by(
+            user_id=user.user_id, room_id=room_id, status='ACTIVE', is_deleted=False
+        ).first()
+        if not active_contract:
+            return jsonify({'message': 'Bạn không có quyền xem chỉ số phòng này'}), 403
+
+    from models.service_rate import ServiceRate
+    rate_ids = [r.rate_id for r in ServiceRate.query.filter_by(service_id=service_id).all()]
+    if not rate_ids:
+        return jsonify({'message': 'Không có rate nào cho service này'}), 404
+
+    from models.bill_detail import BillDetail
+    bill_details = BillDetail.query.filter(
+        BillDetail.room_id == room_id,
+        BillDetail.rate_id.in_(rate_ids),
+        db.extract('year', BillDetail.bill_month) == year
+    ).all()
+
+    # Map theo tháng
+    month_map = {bd.bill_month.month: bd.current_reading for bd in bill_details}
+
+    # Trả về danh sách object: [{month: 1, current_reading: ...}, ...]
+    result = []
+    for month in range(1, 13):
+        result.append({
+            "month": month,
+            "current_reading": month_map.get(month, None)
+        })
+
+    return jsonify(result), 200
+
+@monthly_bill_bp.route('/admin/notify-remind-bill-detail', methods=['POST'])
+@admin_required()
+def notify_remind_bill_detail():
+    """
+    Tự động tìm và gửi thông báo nhắc các phòng chưa nộp chỉ số cho tháng bill_month.
+    """
+    data = request.get_json() or {}
+    bill_month = data.get('bill_month')  # yyyy-MM
+
+    if not bill_month:
+        return jsonify({'message': 'Thiếu bill_month'}), 400
+
+    try:
+        bill_month_date = datetime.strptime(bill_month + '-01', '%Y-%m-%d').date()
+    except ValueError:
+        return jsonify({'message': 'Định dạng bill_month không hợp lệ (YYYY-MM)'}), 400
+
+    # Lấy tất cả phòng không bị xóa
+    all_rooms = Room.query.filter_by(is_deleted=False).all()
+    room_map = {room.room_id: room for room in all_rooms}
+
+    # Lấy các phòng đã có bill detail trong tháng này
+    rooms_with_bill_detail = db.session.query(BillDetail.room_id).filter(
+        BillDetail.bill_month == bill_month_date
+    ).distinct().all()
+    rooms_with_bill_detail_ids = [r[0] for r in rooms_with_bill_detail]
+
+    # Tìm các phòng chưa có bill detail
+    rooms_without_bill_detail = [room_id for room_id in room_map.keys() if room_id not in rooms_with_bill_detail_ids]
+
+    if not rooms_without_bill_detail:
+        return jsonify({'message': 'Tất cả các phòng đã nộp chỉ số cho tháng này'}), 200
+
+    notified_rooms = []
+    
+    for room_id in rooms_without_bill_detail:
+        # Always reset session state at the start of each iteration
+        db.session.rollback()
+        db.session.remove()
+        try:
+            # Always re-query the room and area after session reset
+            room = db.session.query(Room).filter_by(room_id=room_id).first()
+            if not room:
+                continue
+            area_name = room.area.name if room.area else "Không xác định"
+            room_name = room.name
+            
+            # Chỉ gửi cho người dùng có hợp đồng ACTIVE với phòng này
+            active_contracts = Contract.query.filter_by(
+                room_id=room_id, 
+                status='ACTIVE',
+                is_deleted=False
+            ).all()
+            
+            active_user_ids = [c.user_id for c in active_contracts if c.user_id]
+            
+            if not active_user_ids:
+                # Nếu không có người dùng nào đang active, bỏ qua phòng này
+                continue
+            
+            # Tạo thông báo mới
+            notification = Notification(
+                title="Nhắc nhở nộp chỉ số dịch vụ",
+                message=f"Phòng {room_name} - Khu {area_name} chưa nộp chỉ số dịch vụ cho tháng {bill_month}. Vui lòng nộp chỉ số sớm nhất.",
+                target_type="ROOM",
+                target_id=room_id,
+                related_entity_type="BILL_DETAIL",
+                related_entity_id=None,
+                created_at=datetime.utcnow()
+            )
+            db.session.add(notification)
+            db.session.flush()  # Use flush to get notification.id before commit
+            notification_id = notification.id
+            print(f"Created notification with ID: {notification_id} for room {room_id}")
+            
+            # Tạo recipients
+            for user_id in active_user_ids:
+                recipient = NotificationRecipient(
+                    notification_id=notification_id,
+                    user_id=user_id,
+                    is_read=False
+                )
+                db.session.add(recipient)
+            
+            db.session.commit()
+            
+            notified_rooms.append({
+                'room_id': room_id,
+                'room_name': room_name,
+                'area_name': area_name,
+                'notification_id': notification_id,
+                'notified_users': active_user_ids
+            })
+            
+        except Exception as e:
+            db.session.rollback()
+            db.session.remove()
+            print(f"Error processing room {room_id}: {str(e)}")
+            # Tiếp tục với phòng tiếp theo
+
+    return jsonify({
+        'message': f'Đã gửi nhắc nhở nộp chỉ số cho {len(notified_rooms)} phòng',
+        'notified_rooms': notified_rooms
+    }), 200
+
+
+@monthly_bill_bp.route('/admin/notify-remind-payment', methods=['POST'])
+@admin_required()
+def notify_remind_payment():
+    """
+    Tự động tìm và gửi thông báo nhắc các phòng chưa thanh toán hóa đơn tháng bill_month.
+    """
+    data = request.get_json() or {}
+    bill_month = data.get('bill_month')  # yyyy-MM
+
+    if not bill_month:
+        return jsonify({'message': 'Thiếu bill_month'}), 400
+
+    try:
+        bill_month_date = datetime.strptime(bill_month + '-01', '%Y-%m-%d').date()
+    except ValueError:
+        return jsonify({'message': 'Định dạng bill_month không hợp lệ (YYYY-MM)'}), 400
+
+    # Lấy tất cả phòng có hóa đơn chưa thanh toán trong tháng này kèm theo thông tin phòng
+    unpaid_bills = db.session.query(MonthlyBill, Room, Area)\
+        .join(Room, MonthlyBill.room_id == Room.room_id)\
+        .join(Area, Room.area_id == Area.area_id)\
+        .filter(
+            MonthlyBill.bill_month == bill_month_date,
+            MonthlyBill.payment_status != 'PAID'
+        ).distinct().all()
+    
+    if not unpaid_bills:
+        return jsonify({'message': 'Không có phòng nào chưa thanh toán hóa đơn tháng này'}), 200
+
+    notified_rooms = []
+    # Nhóm theo phòng để tránh gửi nhiều thông báo cho cùng một phòng
+    room_bills = {}
+    for bill, room, area in unpaid_bills:
+        if room.room_id not in room_bills:
+            room_bills[room.room_id] = {
+                'room': room,
+                'area': area,
+                'bills': []
+            }
+        room_bills[room.room_id]['bills'].append(bill)
+    
+    for room_id, data in room_bills.items():
+        # Always reset session state at the start of each iteration
+        db.session.rollback()
+        db.session.remove()
+        try:
+            room = data['room']
+            area = data['area']
+            room_name = room.name
+            area_name = area.name if area else "Không xác định"
+            
+            # Tìm danh sách users có hợp đồng ACTIVE với phòng này
+            active_contracts = Contract.query.filter_by(
+                room_id=room_id, 
+                status='ACTIVE',
+                is_deleted=False
+            ).all()
+            
+            active_user_ids = [c.user_id for c in active_contracts if c.user_id]
+            
+            if not active_user_ids:
+                continue
+            
+            # Tạo thông báo mới
+            notification = Notification(
+                title="Nhắc nhở thanh toán hóa đơn",
+                message=f"Phòng {room_name} - Khu {area_name} chưa thanh toán hóa đơn tháng {bill_month}. Vui lòng thanh toán sớm nhất.",
+                target_type="ROOM",
+                target_id=room_id,
+                related_entity_type="MONTHLY_BILL",
+                related_entity_id=None,
+                created_at=datetime.utcnow()
+            )
+            db.session.add(notification)
+            db.session.flush()  # Use flush to get notification.id before commit
+            notification_id = notification.id
+            print(f"Created notification with ID: {notification_id} for room {room_id}")
+            
+            # Tạo recipients
+            for user_id in active_user_ids:
+                recipient = NotificationRecipient(
+                    notification_id=notification_id,
+                    user_id=user_id,
+                    is_read=False
+                )
+                db.session.add(recipient)
+            
+            db.session.commit()
+            
+            notified_rooms.append({
+                'room_id': room_id,
+                'room_name': room_name,
+                'area_name': area_name,
+                'notification_id': notification_id,
+                'notified_users': active_user_ids
+            })
+            
+        except Exception as e:
+            db.session.rollback()
+            db.session.remove()
+            print(f"Error processing room {room_id}: {str(e)}")
+            # Tiếp tục với phòng tiếp theo

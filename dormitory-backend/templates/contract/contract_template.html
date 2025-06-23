@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <title>Hợp đồng thuê chỗ ở nội trú</title>
+    <style>
+        body { font-family: 'Times New Roman', Times, serif; font-size: 16px; margin: 40px; }
+        .header, .footer { text-align: center; }
+        .section-title { font-weight: bold; margin-top: 20px; }
+        .flex-row { display: flex; justify-content: space-between; }
+        .signature { width: 45%; text-align: center; display: inline-block; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        td { vertical-align: top; }
+    </style>
+</head>
+<body>
+    <div class="header" style="width:120%; margin-left:-10%; margin-right:-10%">
+        <table style="width:100%">
+            <tr>
+                <td style="width:50%; text-align:center; vertical-align:top">
+                    <strong>TRƯỜNG ĐẠI HỌC BÁCH KHOA<br>ĐẠI HỌC ĐÀ NẴNG</strong><br>
+                    PHÒNG CTCT HSSV<br>
+                    Số: .../HĐ-KTX
+                </td>
+                <td style="width:50%; text-align:center; vertical-align:top">
+                    <strong>CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM</strong><br>
+                    Độc lập - Tự do - Hạnh phúc
+                </td>
+            </tr>
+        </table>
+    </div>
+    <h2 style="text-align:center; margin-top: 40px;">HỢP ĐỒNG THUÊ CHỖ Ở NỘI TRÚ</h2>
+    {% set contract_day = contract.start_date|string|truncate(10, true, "")|reverse|truncate(2, true, "")|reverse if contract.start_date else "......." %}
+    {% set contract_month = contract.start_date|string|truncate(7, true, "")|reverse|truncate(2, true, "")|reverse if contract.start_date else "......." %}
+    {% set contract_year = contract.start_date|string|truncate(4, true, "") if contract.start_date else "......." %}
+    <p style="text-align:center;">Hôm nay, ngày {{ contract_day }} tháng {{ contract_month }} năm {{ contract_year }}; tại Trường Đại học Bách Khoa - Đại học Đà Nẵng</p>
+    <p>Hai bên gồm:</p>
+    <p><strong>BÊN CHO THUÊ (Bên A): TRƯỜNG ĐẠI HỌC BÁCH KHOA - ĐẠI HỌC ĐÀ NẴNG</strong><br>
+    Đại diện: {{ contract.a_representative or '....................................' }}<br>
+    Đơn vị công tác: {{ contract.a_department or '....................................................' }}<br>
+    Chức vụ: {{ contract.a_position or '............................................' }}<br>
+    Số điện thoại: {{ contract.a_phone or '...............................................' }}</p>
+    
+<p><strong>BÊN THUÊ CHỖ Ở (Bên B):</strong><br>    Họ và tên sinh viên: {{ contract.user_details.fullname if contract.user_details and contract.user_details.fullname else '............................' }}<br>
+    Nam (Nữ): {{ contract.user_details.gender if contract.user_details and contract.user_details.gender else '......' }}<br>
+    Năm sinh: ..............................<br>
+    Mã SV: {{ contract.user_details.student_code if contract.user_details and contract.user_details.student_code else '...................' }}<br>
+    Lớp: {{ contract.user_details.class_name if contract.user_details and contract.user_details.class_name else '...................' }}<br>
+    Khoa: {{ contract.user_details.faculty if contract.user_details and contract.user_details.faculty else '...................' }}<br>
+    Khóa: {{ contract.user_details.course if contract.user_details and contract.user_details.course else '...................' }}<br>
+    Số điện thoại: {{ contract.user_details.phone if contract.user_details and contract.user_details.phone else '...................' }}<br>
+    Email: {{ contract.user_details.email if contract.user_details and contract.user_details.email else '...................' }}<br>
+    Hộ khẩu thường trú: {{ contract.user_details.hometown if contract.user_details and contract.user_details.hometown else '............................................................' }}</p>
+    <p>Bên A được sự ủy quyền của Hiệu trưởng Trường Đại học Bách Khoa - Đại học Đà Nẵng, cùng Bên B, thống nhất ký kết Hợp đồng cho thuê chỗ ở nội trú tại Ký túc xá Trường Đại học Bách Khoa - Đại học Đà Nẵng với các điều khoản sau:</p>
+    
+    <div class="section-title">Điều 1:</div>
+    <p>Bên A đồng ý cho Bên B thuê 01 chỗ ở nội trú tại phòng số: {{ contract.room_details.name if contract.room_details and contract.room_details.name else '............' }} 
+        {% if contract.room_details and contract.room_details.area_details %}
+            Tầng {{ contract.room_details.floor if contract.room_details.floor else '...' }} Nhà: {{ contract.room_details.area_details.name if contract.room_details.area_details.name else '...' }} 
+        {% else %}
+            Tầng {{ contract.room_details.floor if contract.room_details and contract.room_details.floor else '...' }} Nhà: {{ contract.room_details.area_name if contract.room_details and contract.room_details.area_name else '...' }}
+        {% endif %}
+        Ký túc xá Trường Đại học Bách Khoa - Đại học Đà Nẵng. Bên B được phép sử dụng các tài sản do nhà trường trang bị tại phòng ở cũng như các phòng sinh hoạt tập thể thuộc khuôn viên Ký túc xá theo Quy chế tổ chức & hoạt động, các quy định và nội quy của Ký túc xá.</p>
+    <div class="section-title">Điều 2: Giá cả, thời gian và phương thức thanh toán.</div>
+    <p>2.1. Đơn giá cho thuê: {% if contract.room_details and contract.room_details.price %}{{ contract.room_details.price }}{% elif contract.price_per_month %}{{ contract.price_per_month }}{% else %}.............................{% endif %} đồng/tháng.</p>
+    {% if contract.start_date and contract.start_date != "None" %}
+        {% set start_date = contract.start_date|string %}
+    {% else %}
+        {% set start_date = '.....................' %}
+    {% endif %}
+      {% if contract.end_date and contract.end_date != "None" %}
+        {% set end_date = contract.end_date|string %}
+    {% else %}
+        {% set end_date = '.....................' %}
+    {% endif %}
+      <p>2.2. Thời gian cho thuê: {{ contract.duration if contract.duration else '01 học kỳ 05 tháng' }} tính từ ngày {{ start_date }} đến ngày {{ end_date }}.<br>
+        Ngoài ra Bên B phải đóng thêm tiền điện, nếu sử dụng vượt mức tiêu thụ điện là: {{ contract.electricity_limit if contract.electricity_limit else '..........' }}/tháng/1người, theo quy định chung của Ký túc xá.</p>    <p>2.3. Phương thức thanh toán: Bên B thanh toán cho Bên A tiền thuê chỗ ở nội trú bằng tiền mặt 1 lần tại phòng Quản lý Ký túc xá của nhà trường trong vòng 01 ngày sau khi hợp đồng được ký kết.</p>
+    
+    <div class="section-title">Điều 3: Hợp đồng hết hiệu lực và bên A không có trách nhiệm hoàn trả tiền cho bên B khi:</div>
+    <ul>
+        <li>Thời hạn ghi trong hợp đồng kết thúc.</li>
+        <li>Bên B đề nghị chấm dứt hợp đồng trước thời hạn.</li>
+        <li>Bên B hiện không còn là sinh viên của trường: đã tốt nghiệp, bị đình chỉ học tập, bị đuổi học hoặc tự ý bỏ học.</li>
+        <li>Bên B không đảm bảo về sức khỏe, mắc các chứng bệnh về lây nhiễm theo kết luận của cơ quan y tế cấp quận (huyện) trở lên.</li>
+        <li>Bên B vi phạm Nội quy Ký túc xá, bị xử lý kỷ luật theo Khung kỷ luật ban hành mức chấm dứt hợp đồng, cho ra khỏi Ký túc xá.</li>
+    </ul>
+    <div class="section-title">Điều 4: Trách nhiệm của bên B.</div>
+    <ul>
+        <li>Ở đúng nơi đã được Ban quản trị Ký túc xá sắp xếp (vị trí phòng ở và giường ở).</li>
+        <li>Chấp hành sự điều chuyển chỗ ở của Ban quản trị Ký túc xá trong trường hợp cần thiết và có lý do chính đáng: (Ký túc xá sửa chữa nâng cấp, lý do về an ninh trật tự và một số lý do khác).</li>
+        <li>Không được cho thuê lại chỗ ở cũng như tự ý chuyển nhượng lại hợp đồng cho người khác.</li>
+        <li>Không được đun nấu trong phòng ở và xung quanh khu nội trú.</li>
+        <li>Chấp hành nghiêm chỉnh các quy định của Nhà nước, của Trường, Nội quy Ký túc xá.</li>
+        <li>Tự bảo quản tài sản và đồ dùng cá nhân, tự chịu trách nhiệm về việc bảo vệ an toàn cho mình đối với việc sử dụng các dụng cụ, thiết bị cũng như các hoạt động khác.</li>
+        <li>Có ý thức tự giác trong việc bảo quản tài sản công, triệt để tiết kiệm, chống lãng phí, thực hiện nghĩa vụ đầy đủ về trật tự vệ sinh Ký túc xá. Cam kết giữ nghiêm, có tinh thần trách nhiệm và ý thức tập thể.</li>
+        <li>Bồi thường các mất mát hư hỏng tài sản công do mình gây ra theo quy định chung của nhà trường.</li>
+        <li>Tự thanh toán các chi phí dịch vụ cá nhân khác như dịch vụ ăn uống, gửi xe...</li>
+        <li>Thanh toán đầy đủ các khoản phí đúng hạn, lưu giữ phiếu thu để đối chiếu khi cần thiết.</li>
+        <li>Cam kết giữ nghiêm kỷ luật nội trú, có tinh thần trách nhiệm và ý thức tập thể.</li>
+        <li>Phải trả phòng và ra khỏi ký túc xá vào ngày hợp đồng hết hiệu lực.</li>
+    </ul>
+    <div class="section-title">Điều 5: Trách nhiệm của Bên A.</div>
+    <ul>
+        <li>Sắp xếp chỗ ở cho Bên B ngay sau khi Bên B đã hoàn thành các thủ tục đăng ký chỗ ở theo quy định và thời gian trong hợp đồng.</li>
+        <li>Đảm bảo các điều kiện về việc sinh hoạt và học tập cho Bên B theo quy định chung.</li>
+        <li>Hướng dẫn Bên B sử dụng các trang thiết bị trong phòng ở.</li>
+        <li>Lưu hoá đơn (phiếu thu) các khoản tiền do Bên B đóng.</li>
+    </ul>
+    <div class="section-title">Điều 6: Điều khoản chung.</div>
+    <ul>
+        <li>Bên nào muốn chấm dứt hợp đồng trước thời hạn phải có văn bản báo cho bên thứ hai biết trước ít nhất là 15 ngày (trừ trường hợp SV bị xử lý kỷ luật vì các lý do khác, hay bị kỷ luật vì vi phạm quy định KTX).</li>
+        <li>Quy chế tổ chức & hoạt động Ký túc xá, Nội quy Ký túc xá, Phiếu đăng ký ở nội trú, Bản cam kết đã ký là bộ phận chung của hợp đồng này.</li>
+        <li>Hai bên cam kết thực hiện theo đúng các điều khoản của hợp đồng và Bản cam kết.</li>
+        <li>Hợp đồng được lập thành 02 bản có giá trị ngang nhau, Bên A giữ 01 bản và Bên B giữ 01 bản.</li>
+        <li>Bên B phải bàn giao trang thiết bị phòng ở cho bên A khi nghỉ hè (Tết), thực tập và trước khi kết thúc hợp đồng.</li>
+    </ul>
+    <br><br>
+    <div class="flex-row">
+        <div class="signature">
+            <strong>Bên A</strong><br>(Ký, ghi rõ họ tên)
+        </div>
+        <div class="signature">
+            <strong>Bên B</strong><br>(Ký, ghi rõ họ tên)
+        </div>
+    </div>
+</body>
+</html>

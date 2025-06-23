@@ -12,6 +12,11 @@ from unidecode import unidecode
 import re
 from flask import current_app
 import uuid
+from models.user import User
+from models.contract import Contract
+from flask import send_file
+import openpyxl
+from io import BytesIO
 
 # Thiết lập logging
 logging.basicConfig(level=logging.INFO)
@@ -175,3 +180,156 @@ def delete_area(area_id):
     except SQLAlchemyError as e:
         db.session.rollback()
         return jsonify({"message": "Lỗi khi lưu dữ liệu vào database"}), 500
+
+# Lấy danh sách khu vực kèm theo số lượng sinh viên (admin)
+@area_bp.route('/areas-with-student-count', methods=['GET'])
+@admin_required()
+def get_areas_with_student_count():
+    areas = Area.query.all()
+    result = []
+    for area in areas:
+        # Lấy tất cả phòng thuộc area này
+        rooms = area.rooms
+        # Đếm số sinh viên có hợp đồng ACTIVE trong các phòng này
+        student_ids = set()
+        for room in rooms:
+            for contract in room.contracts:
+                if contract.status == 'ACTIVE' and not contract.is_deleted:
+                    student_ids.add(contract.user_id)
+        result.append({
+            'area_id': area.area_id,
+            'area_name': area.name,
+            'student_count': len(student_ids)
+        })
+    return jsonify(result), 200
+
+@area_bp.route('/admin/areas/<int:area_id>/users', methods=['GET'])
+@admin_required()
+def get_users_in_area(area_id):
+    try:
+        area = Area.query.get(area_id)
+        if not area:
+            return jsonify({'message': 'Không tìm thấy khu vực'}), 404
+        # Lấy tất cả phòng thuộc khu vực này
+        rooms = Room.query.filter_by(area_id=area_id, is_deleted=False).all()
+        room_ids = [room.room_id for room in rooms]
+        # Lấy tất cả hợp đồng ACTIVE trong các phòng này
+        contracts = Contract.query.filter(
+            Contract.room_id.in_(room_ids),
+            Contract.status == 'ACTIVE',
+            Contract.is_deleted == False
+        ).all()
+        user_ids = {contract.user_id for contract in contracts}
+        users = User.query.filter(User.user_id.in_(user_ids)).all()
+        return jsonify([user.to_dict() for user in users]), 200
+    except SQLAlchemyError as e:
+        logger.error(f"Database error fetching users in area {area_id}: {str(e)}")
+        return jsonify({'message': 'Lỗi database'}), 500
+
+@area_bp.route('/admin/areas/<int:area_id>/users/export', methods=['GET'])
+@admin_required()
+def export_users_in_area(area_id):
+    try:
+        area = Area.query.get(area_id)
+        if not area:
+            return jsonify({'message': 'Không tìm thấy khu vực'}), 404
+        rooms = Room.query.filter_by(area_id=area_id, is_deleted=False).all()
+        room_ids = [room.room_id for room in rooms]
+        contracts = Contract.query.filter(
+            Contract.room_id.in_(room_ids),
+            Contract.status == 'ACTIVE',
+            Contract.is_deleted == False
+        ).all()
+        user_ids = {contract.user_id for contract in contracts}
+        users = User.query.filter(User.user_id.in_(user_ids)).all()
+        # Tạo workbook Excel
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Danh sách sinh viên"
+        # Header
+        ws.append(['ID', 'Họ tên', 'Email', 'MSSV', 'SĐT', 'Quê quán'])
+        # Data
+        for user in users:
+            ws.append([
+                user.user_id,
+                user.fullname,
+                user.email,
+                user.student_code,
+                user.phone,
+                user.hometown
+            ])
+        # Lưu vào bộ nhớ và trả về file
+        output = BytesIO()
+        wb.save(output)
+        output.seek(0)
+        filename = f"users_in_area_{area_id}.xlsx"
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name=filename,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+    except SQLAlchemyError as e:
+        logger.error(f"Database error exporting users in area {area_id}: {str(e)}")
+        return jsonify({'message': 'Lỗi database'}), 500
+
+@area_bp.route('/admin/areas/users/export', methods=['GET'])
+@admin_required()
+def export_all_users_in_all_areas():
+    try:
+        rooms = Room.query.filter_by(is_deleted=False).all()
+        room_ids = [room.room_id for room in rooms]
+        contracts = Contract.query.filter(
+            Contract.room_id.in_(room_ids),
+            Contract.status == 'ACTIVE',
+            Contract.is_deleted == False
+        ).all()
+        user_ids = {contract.user_id for contract in contracts}
+        users = User.query.filter(User.user_id.in_(user_ids)).all()
+        # Tạo workbook Excel
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Danh sách sinh viên"
+        ws.append(['ID', 'Họ tên', 'Email', 'MSSV', 'SĐT', 'Quê quán'])
+        for user in users:
+            ws.append([
+                user.user_id,
+                user.fullname,
+                user.email,
+                user.student_code,
+                user.phone,
+                user.hometown
+            ])
+        output = BytesIO()
+        wb.save(output)
+        output.seek(0)
+        filename = f"users_in_all_areas.xlsx"
+        return send_file(
+            output,
+            as_attachment=True,
+            download_name=filename,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
+    except SQLAlchemyError as e:
+        logger.error(f"Database error exporting all users in all areas: {str(e)}")
+        return jsonify({'message': 'Lỗi database'}), 500
+
+@area_bp.route('/admin/areas/users', methods=['GET'])
+@admin_required()
+def get_all_users_in_all_areas():
+    try:
+        # Lấy tất cả phòng chưa xóa
+        rooms = Room.query.filter_by(is_deleted=False).all()
+        room_ids = [room.room_id for room in rooms]
+        # Lấy tất cả hợp đồng ACTIVE trong các phòng này
+        contracts = Contract.query.filter(
+            Contract.room_id.in_(room_ids),
+            Contract.status == 'ACTIVE',
+            Contract.is_deleted == False
+        ).all()
+        user_ids = {contract.user_id for contract in contracts}
+        users = User.query.filter(User.user_id.in_(user_ids)).all()
+        return jsonify([user.to_dict() for user in users]), 200
+    except SQLAlchemyError as e:
+        logger.error(f"Database error fetching all users in all areas: {str(e)}")
+        return jsonify({'message': 'Lỗi database'}), 500

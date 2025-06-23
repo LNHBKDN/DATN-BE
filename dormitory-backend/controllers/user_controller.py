@@ -9,7 +9,7 @@ from models.notification_recipient import NotificationRecipient
 from controllers.auth_controller import admin_required, user_required
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_mail import Message
-from pydantic import BaseModel, EmailStr, validator
+from pydantic import BaseModel, EmailStr, validator, field_validator
 from typing import Optional
 import os
 from werkzeug.utils import secure_filename
@@ -32,7 +32,8 @@ user_bp = Blueprint('user', __name__)
 class UserCreateSchema(BaseModel):
     email: EmailStr
     fullname: str
-    phone: Optional[str] = None
+    student_code: str
+    hometown: str  
 
     @validator('fullname')
     def validate_fullname(cls, v):
@@ -40,19 +41,46 @@ class UserCreateSchema(BaseModel):
             raise ValueError('Fullname phải từ 2 đến 255 ký tự')
         return v.strip()
 
-    @validator('phone')
-    def validate_phone(cls, v):
-        if v and (len(v) < 10 or not v.isdigit()):
-            raise ValueError('Số điện thoại không hợp lệ')
-        return v
+    @validator('student_code')
+    def validate_student_code(cls, v):
+        if not v or not v.strip():
+            raise ValueError('Mã số sinh viên là bắt buộc')
+        if len(v) > 20:
+            raise ValueError('Mã số sinh viên không được vượt quá 20 ký tự')
+        return v.strip()
+
+    @validator('hometown')
+    def validate_hometown(cls, v):
+        if not v or v.strip() == "":
+            raise ValueError('Quê quán là bắt buộc')
+        if len(v) > 255:
+            raise ValueError('Quê quán không được vượt quá 255 ký tự')
+        return v.strip()
 
 class UserUpdateSchema(BaseModel):
     email: Optional[EmailStr] = None
     fullname: Optional[str] = None
-    phone: Optional[str] = None
     CCCD: Optional[str] = None
-    date_of_birth: Optional[date] = None
+    date_of_birth: datetime | None = None
     class_name: Optional[str] = None
+    student_code: Optional[str] = None
+    hometown: Optional[str] = None
+
+    @field_validator('date_of_birth', mode='before')
+    def parse_date_of_birth(cls, v):
+        if v is None:
+            return v
+        if isinstance(v, datetime):
+            return v
+        try:
+            # Thử parse theo dd-MM-yyyy
+            return datetime.strptime(v, '%d-%m-%Y')
+        except ValueError:
+            # Nếu không được, thử ISO (yyyy-MM-dd)
+            try:
+                return datetime.strptime(v, '%Y-%m-%d')
+            except ValueError:
+                raise ValueError('date_of_birth phải có định dạng dd-MM-yyyy hoặc yyyy-MM-dd')
 
     @validator('fullname')
     def validate_fullname(cls, v):
@@ -60,11 +88,11 @@ class UserUpdateSchema(BaseModel):
             raise ValueError('Fullname phải từ 2 đến 255 ký tự')
         return v.strip() if v else v
 
-    @validator('phone')
-    def validate_phone(cls, v):
-        if v and (len(v) < 10 or not v.isdigit()):
-            raise ValueError('Số điện thoại không hợp lệ')
-        return v
+    # @validator('phone')
+    # def validate_phone(cls, v):
+    #     if v and (len(v) < 10 or not v.isdigit()):
+    #         raise ValueError('Số điện thoại không hợp lệ')
+    #     return v
 
     @validator('CCCD')
     def validate_CCCD(cls, v):
@@ -72,16 +100,22 @@ class UserUpdateSchema(BaseModel):
             raise ValueError('CCCD phải là chuỗi 12 chữ số')
         return v
 
-    @validator('date_of_birth')
-    def validate_date_of_birth(cls, v):
-        if v and v > date.today():
-            raise ValueError('Ngày sinh không được là tương lai')
-        return v
-
     @validator('class_name')
     def validate_class_name(cls, v):
         if v and len(v) > 50:
             raise ValueError('Tên lớp không được vượt quá 50 ký tự')
+        return v.strip() if v else v
+
+    @validator('student_code')
+    def validate_student_code(cls, v):
+        if v and len(v) > 20:
+            raise ValueError('Mã số sinh viên không được vượt quá 20 ký tự')
+        return v.strip() if v else v
+
+    @validator('hometown')
+    def validate_hometown(cls, v):
+        if v and len(v) > 255:
+            raise ValueError('Quê quán không được vượt quá 255 ký tự')
         return v.strip() if v else v
 
 class PasswordChangeSchema(BaseModel):
@@ -183,9 +217,13 @@ def create_user():
             logger.debug("Email %s already in use", data.email)
             return jsonify({'message': 'Email đã được sử dụng'}), 400
 
-        if data.phone and User.query.filter_by(phone=data.phone).first():
-            logger.debug("Phone %s already in use", data.phone)
-            return jsonify({'message': 'Số điện thoại đã được sử dụng'}), 400
+        # if data.phone and User.query.filter_by(phone=data.phone).first():
+        #     logger.debug("Phone %s already in use", data.phone)
+        #     return jsonify({'message': 'Số điện thoại đã được sử dụng'}), 400
+
+        if User.query.filter_by(student_code=data.student_code).first():
+            logger.debug("Student code %s already in use", data.student_code)
+            return jsonify({'message': 'Mã số sinh viên đã được sử dụng'}), 400
 
         raw_password = secrets.token_urlsafe(12)
         password_hash = generate_password_hash(raw_password)
@@ -194,7 +232,8 @@ def create_user():
             email=data.email,
             password_hash=password_hash,
             fullname=data.fullname,
-            phone=data.phone,
+            student_code=data.student_code,
+            hometown=data.hometown,
             is_deleted=False,
             version=1
         )
@@ -262,6 +301,8 @@ def create_user():
         if "Duplicate entry" in str(e):
             if "phone" in str(e):
                 return jsonify({'message': 'Số điện thoại đã được sử dụng'}), 400
+            if "student_code" in str(e):
+                return jsonify({'message': 'Mã số sinh viên đã được sử dụng'}), 400
             return jsonify({'message': 'Email đã được sử dụng'}), 400
         return jsonify({'message': 'Lỗi database'}), 500
 
@@ -286,6 +327,8 @@ def update_user(user_id):
         user.CCCD = data.CCCD or user.CCCD
         user.date_of_birth = data.date_of_birth or user.date_of_birth
         user.class_name = data.class_name or user.class_name
+        user.student_code = data.student_code or user.student_code
+        user.hometown = data.hometown or user.hometown
         user.version += 1
 
         if data.email and User.query.filter(User.email == user.email, User.user_id != user_id).first():
@@ -297,6 +340,9 @@ def update_user(user_id):
         if data.CCCD and User.query.filter(User.CCCD == user.CCCD, User.user_id != user_id).first():
             logger.warning(f"CCCD already in use: {user.CCCD}")
             return jsonify({'message': 'CCCD đã được sử dụng bởi người dùng khác'}), 400
+        if data.student_code and User.query.filter(User.student_code == user.student_code, User.user_id != user_id).first():
+            logger.warning(f"Student code already in use: {user.student_code}")
+            return jsonify({'message': 'Mã số sinh viên đã được sử dụng bởi người dùng khác'}), 400
 
         db.session.commit()
         logger.info(f"User updated successfully: user_id={user_id}")
@@ -312,6 +358,8 @@ def update_user(user_id):
                 return jsonify({'message': 'Số điện thoại đã được sử dụng bởi người dùng khác'}), 400
             if "CCCD" in str(e):
                 return jsonify({'message': 'CCCD đã được sử dụng bởi người dùng khác'}), 400
+            if "student_code" in str(e):
+                return jsonify({'message': 'Mã số sinh viên đã được sử dụng bởi người dùng khác'}), 400
             return jsonify({'message': 'Email đã được sử dụng bởi người dùng khác'}), 400
         return jsonify({'message': 'Lỗi database'}), 500
     except Exception as e:
@@ -390,6 +438,8 @@ def update_user_profile():
         user.CCCD = data.CCCD or user.CCCD
         user.date_of_birth = data.date_of_birth or user.date_of_birth
         user.class_name = data.class_name or user.class_name
+        user.student_code = data.student_code or user.student_code
+        user.hometown = data.hometown or user.hometown
         user.version += 1
 
         # Kiểm tra trùng lặp phone
@@ -401,6 +451,11 @@ def update_user_profile():
         if data.CCCD and User.query.filter(User.CCCD == user.CCCD, User.user_id != user_id).first():
             logger.warning(f"CCCD already in use: {user.CCCD}")
             return jsonify({'message': 'CCCD đã được sử dụng bởi người dùng khác'}), 400
+
+        # Kiểm tra trùng lặp mã số sinh viên
+        if data.student_code and User.query.filter(User.student_code == user.student_code, User.user_id != user_id).first():
+            logger.warning(f"Student code already in use: {user.student_code}")
+            return jsonify({'message': 'Mã số sinh viên đã được sử dụng bởi người dùng khác'}), 400
 
         db.session.commit()
         logger.info(f"Profile updated successfully for user_id={user_id}")
@@ -417,6 +472,8 @@ def update_user_profile():
                 return jsonify({'message': 'Số điện thoại đã được sử dụng bởi người dùng khác'}), 400
             if "CCCD" in str(e):
                 return jsonify({'message': 'CCCD đã được sử dụng bởi người dùng khác'}), 400
+            if "student_code" in str(e):
+                return jsonify({'message': 'Mã số sinh viên đã được sử dụng bởi người dùng khác'}), 400
         return jsonify({'message': 'Lỗi database'}), 500
     except Exception as e:
         logger.error(f"Unexpected error updating profile for user {user_id}: {str(e)}")

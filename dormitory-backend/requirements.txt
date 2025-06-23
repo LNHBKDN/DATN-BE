@@ -23,3 +23,7 @@ bleach==6.1.0
 Flask-Cors
 pendulum
 firebase-admin
+openpyxl
+pdfkit
+Jinja2
+WeasyPrint

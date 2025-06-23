@@ -28,7 +28,9 @@ This is a Flask-based backend for a dormitory management system, supporting user
      ```bash
      flask db init
      flask db migrate -m "Initial migration"
-     flask db upgrade
+     flask db upgrade 
+     or
+     python -m flask db upgrade
      ```
 
 5. **Run the Application**:
@@ -37,58 +39,21 @@ This is a Flask-based backend for a dormitory management system, supporting user
    ```
    The server will start at `http://127.0.0.1:5000`.
 
-## API Usage
+## PDF Export Setup (WeasyPrint on Windows)
 
-### Authentication
-- **Login**: `POST /api/auth/login`
-  - **Request Body**: `{ "email": "user@example.com", "password": "password" }`
-  - **Response**: `{ "access_token": "jwt_token", "user_id": 1, "role": "USER" }`
-  - **Description**: Authenticates a user and returns a JWT token.
+To enable PDF export (contract export) using WeasyPrint, you must install additional system libraries on Windows:
 
-- **Logout**: `POST /api/auth/logout`
-  - **Headers**: `Authorization: Bearer <jwt_token>`
-  - **Response**: `{ "message": "Logged out successfully" }`
-  - **Description**: Logs out the user (client-side token removal).
+1. **Install WeasyPrint Python package:**
+   ```
+   pip install WeasyPrint
+   ```
+2. **Install GTK3 Runtime:**
+   - Download the latest GTK3 runtime installer from: https://github.com/tschoonj/GTK-for-Windows-Runtime-Environment-Installer/releases
+   - Run the installer and complete the installation. Note the install path (e.g., `C:\Program Files\GTK3-Runtime Win64\bin`).
+3. **Add GTK3 to your system PATH:**
+   - Open "Edit the system environment variables" > "Environment Variables".
+   - Under "System variables", select "Path" and click "Edit".
+   - Add the GTK3 `bin` path (e.g., `C:\Program Files\GTK3-Runtime Win64\bin`).
+   - Click OK to save.
+4. **Restart your computer or terminal.**
 
-### User Management
-- **Get All Users (Admin)**: `GET /api/users`
-  - **Headers**: `Authorization: Bearer <jwt_token>`
-  - **Query Params**: `page=1&limit=10&role=USER&search=john`
-  - **Response**: List of user objects (without passwords)
-  - **Description**: Retrieves paginated list of users (Admin only).
-
-- **Get Current User**: `GET /api/me`
-  - **Headers**: `Authorization: Bearer <jwt_token>`
-  - **Response**: Single user object (without password)
-  - **Description**: Retrieves the profile of the logged-in user.
-
-### Room Management
-- **Get All Rooms**: `GET /api/rooms`
-  - **Query Params**: `page=1&limit=10&min_capacity=2&max_capacity=8&available=true`
-  - **Response**: List of room objects
-  - **Description**: Retrieves rooms with filtering and pagination (public access).
-
-- **Create Room (Admin)**: `POST /api/admin/rooms`
-  - **Headers**: `Authorization: Bearer <jwt_token>`
-  - **Request Body**: `{ "name": "Room 101", "capacity": 4, "price": 500000, "description": "Nice room" }`
-  - **Response**: Newly created room object
-  - **Description**: Creates a new room (Admin only).
-
-*(Additional endpoints for other services like contracts, payments, etc., follow similar patterns as per the API list.)*
-
-## Testing with Postman or curl
-
-- **Login Example (curl)**:
-  ```bash
-  curl -X POST http://127.0.0.1:5000/api/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"email": "admin@example.com", "password": "admin123"}'
-  ```
-
-- **Get All Users (Postman)**:
-  - Method: GET
-  - URL: `http://127.0.0.1:5000/api/users?page=1&limit=10`
-  - Headers: `Authorization: Bearer <jwt_token>`
-  - Response: JSON list of users
-
-*(Add similar examples for other key endpoints as needed.)*

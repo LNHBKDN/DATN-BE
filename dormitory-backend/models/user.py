@@ -11,6 +11,8 @@ class User(db.Model):
     CCCD = db.Column(db.String(12), unique=True)
     class_name = db.Column(db.String(50))
     avatar_url = db.Column(db.String(512))
+    hometown = db.Column(db.String(255))  # Thêm trường quê quán
+    student_code = db.Column(db.String(20), unique=True)  # Thêm trường MSSV
     created_at = db.Column(db.TIMESTAMP, default=db.func.current_timestamp())
     reset_token = db.Column(db.String(255))
     reset_token_expiry = db.Column(db.DateTime)
@@ -29,10 +31,12 @@ class User(db.Model):
             'fullname': self.fullname,
             'email': self.email,
             'phone': self.phone,
-            'date_of_birth': self.date_of_birth.isoformat() if self.date_of_birth else None,
+            'date_of_birth': self.date_of_birth.strftime('%d-%m-%Y') if self.date_of_birth else None,
             'CCCD': self.CCCD,
             'class_name': self.class_name,
             'avatar_url': self.avatar_url,
+            'hometown': self.hometown,
+            'student_code': self.student_code,
             'created_at': self.created_at.isoformat() if self.created_at else None,
             'is_deleted': self.is_deleted,
             'deleted_at': self.deleted_at.isoformat() if self.deleted_at else None,
