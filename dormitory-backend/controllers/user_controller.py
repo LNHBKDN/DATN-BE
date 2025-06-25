@@ -60,6 +60,7 @@ class UserCreateSchema(BaseModel):
 class UserUpdateSchema(BaseModel):
     email: Optional[EmailStr] = None
     fullname: Optional[str] = None
+    phone: Optional[str] = None  
     CCCD: Optional[str] = None
     date_of_birth: datetime | None = None
     class_name: Optional[str] = None
