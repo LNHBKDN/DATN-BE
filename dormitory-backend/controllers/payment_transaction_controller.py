@@ -145,22 +145,14 @@ def create_payment_transaction():
             logging.error(f"Payment method {payment_method} not allowed for bill_id {bill_id}")
             return jsonify({'message': f'Phương thức thanh toán {payment_method} không được phép'}), 400
 
-        existing_transaction = PaymentTransaction.query.filter_by(
+        # Hủy tất cả transaction PENDING cũ (nếu có nhiều dòng)
+        pending_transactions = PaymentTransaction.query.filter_by(
             bill_id=bill_id, status='PENDING'
-        ).first()
+        ).all()
 
-        if existing_transaction:
-            if bill.payment_status != 'PENDING':
-                logging.info(f"Bill {bill_id} no longer in PENDING status")
-                return jsonify({'message': 'Hóa đơn không còn ở trạng thái PENDING'}), 409
-            if existing_transaction.created_at < datetime.utcnow() - timedelta(minutes=15):
-                existing_transaction.status = 'CANCELLED'
-                db.session.commit()
-                logging.info(f"Cancelled expired PaymentTransaction {existing_transaction.transaction_id} for bill {bill_id}")
-            else:
-                existing_transaction.status = 'CANCELLED'
-                db.session.commit()
-                logging.info(f"Cancelled PaymentTransaction {existing_transaction.transaction_id} to create a new one for bill {bill_id}")
+        for tx in pending_transactions:
+            tx.status = 'CANCELLED'
+        db.session.commit()
 
         transaction = PaymentTransaction(
             bill_id=bill_id,
