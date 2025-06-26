@@ -179,8 +179,10 @@ def submit_bill_detail():
                     bill_month=bill_month_date,
                     submitted_by=user_id
                 )
-                bill_details.append(bill_detail)
                 db.session.add(bill_detail)
+                db.session.flush()  
+
+                bill_details.append(bill_detail)
 
             db.session.commit()
 
@@ -370,13 +372,14 @@ def create_monthly_bills_bulk():
 
                     bill = MonthlyBill(
                         user_id=user_id,
-                        detail_id=detail.detail_id,
+                        detail_id=detail.detail_id,  # Lúc này detail_id đã đúng
                         room_id=room_id,
                         bill_month=bill_month_date,
                         total_amount=float(detail.price),
                         payment_method_allowed='VNPAY'
                     )
                     db.session.add(bill)
+                    db.session.flush()
                     new_bills.append(bill)
                     logging.debug(f"Created new bill with bill_id {bill.bill_id} for room_id {room_id}")
 
